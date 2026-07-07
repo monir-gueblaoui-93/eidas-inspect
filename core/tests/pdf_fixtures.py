@@ -13,12 +13,49 @@ from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
 from pyhanko.pdf_utils.reader import PdfFileReader
 from pyhanko.pdf_utils.writer import PageObject, PdfFileWriter
 from pyhanko.sign import PdfSignatureMetadata, PdfTimeStamper, SimpleSigner, sign_pdf
+from pyhanko.sign.ades.qualified_asn1 import (
+    QcCertificateType,
+    QcStatement,
+    QcStatements as PyhankoQcStatements,
+)
 from pyhanko.sign.timestamps import DummyTimeStamper
 from pyhanko_certvalidator.registry import SimpleCertificateStore
 
+QC_STATEMENTS_EXTENSION_OID = '1.3.6.1.5.5.7.1.3'
+QC_TYPE_ESIGN_OID = '0.4.0.1862.1.6.1'
+QC_TYPE_ESEAL_OID = '0.4.0.1862.1.6.2'
+
+
+def _build_qc_statements_der(
+    *,
+    qc_compliance: bool = False,
+    qc_sscd: bool = False,
+    qc_type_oid: str | None = None,
+) -> bytes:
+    statements = []
+    if qc_compliance:
+        statements.append(QcStatement({'statement_id': 'qc_compliance'}))
+    if qc_sscd:
+        statements.append(QcStatement({'statement_id': 'qc_sscd'}))
+    if qc_type_oid is not None:
+        statements.append(
+            QcStatement(
+                {
+                    'statement_id': 'qc_type',
+                    'statement_info': QcCertificateType([qc_type_oid]),
+                }
+            )
+        )
+    return PyhankoQcStatements(statements).dump()
+
 
 def generate_self_signed_signer(
-    common_name: str = 'Test Signer', organization: str = 'Test QTSP'
+    common_name: str = 'Test Signer',
+    organization: str = 'Test QTSP',
+    *,
+    qc_compliance: bool = False,
+    qc_sscd: bool = False,
+    qc_type_oid: str | None = None,
 ) -> SimpleSigner:
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     subject = cx509.Name(
@@ -28,7 +65,7 @@ def generate_self_signed_signer(
         ]
     )
     now = datetime.now(timezone.utc)
-    cert = (
+    builder = (
         cx509.CertificateBuilder()
         .subject_name(subject)
         .issuer_name(subject)
@@ -36,8 +73,18 @@ def generate_self_signed_signer(
         .serial_number(cx509.random_serial_number())
         .not_valid_before(now - timedelta(days=1))
         .not_valid_after(now + timedelta(days=365))
-        .sign(key, hashes.SHA256())
     )
+    if qc_compliance or qc_sscd or qc_type_oid is not None:
+        der = _build_qc_statements_der(
+            qc_compliance=qc_compliance, qc_sscd=qc_sscd, qc_type_oid=qc_type_oid
+        )
+        builder = builder.add_extension(
+            cx509.UnrecognizedExtension(
+                cx509.ObjectIdentifier(QC_STATEMENTS_EXTENSION_OID), der
+            ),
+            critical=False,
+        )
+    cert = builder.sign(key, hashes.SHA256())
     signing_key = keys.PrivateKeyInfo.load(
         key.private_bytes(
             serialization.Encoding.DER,

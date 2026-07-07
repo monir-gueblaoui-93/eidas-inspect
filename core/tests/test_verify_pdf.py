@@ -20,7 +20,7 @@ def test_unsigned_pdf_yields_no_signatures_verdict(unsigned_pdf):
     assert len(result.document_sha256) == 64
 
 
-def test_signed_pdf_is_read_intact_with_level_and_trust_unknown(signed_pdf):
+def test_signed_pdf_without_qc_statements_is_advanced_with_trust_unknown(signed_pdf):
     result = verify_pdf(signed_pdf)
 
     assert result.verdict == VerificationVerdict.PARTIAL
@@ -34,8 +34,41 @@ def test_signed_pdf_is_read_intact_with_level_and_trust_unknown(signed_pdf):
     assert item.signer_name == 'Test Signer'
     assert item.issuing_tsp == 'Test QTSP'
     assert item.signing_time is not None
-    assert item.level == SignatureLevel.UNKNOWN
+    assert item.level == SignatureLevel.ADVANCED
     assert item.trust_chain_status == TrustChainStatus.UNKNOWN
+    assert 'No qcStatements' in item.technical_detail
+
+
+def test_clean_qes_is_classified_as_qualified_signature(qes_signed_pdf):
+    result = verify_pdf(qes_signed_pdf)
+
+    item = result.items[0]
+    assert item.type == SignatureType.SIGNATURE
+    assert item.level == SignatureLevel.QUALIFIED
+    assert 'qualified signature' in item.plain_explanation
+    assert 'Trusted List' in item.plain_explanation
+    assert item.trust_chain_status == TrustChainStatus.UNKNOWN
+
+
+def test_clean_qseal_is_classified_as_qualified_seal(qseal_signed_pdf):
+    result = verify_pdf(qseal_signed_pdf)
+
+    item = result.items[0]
+    assert item.type == SignatureType.SEAL
+    assert item.level == SignatureLevel.QUALIFIED
+    assert 'qualified seal' in item.plain_explanation
+
+
+def test_sloppy_cert_missing_qc_type_falls_back_to_advanced(sloppy_qc_signed_pdf):
+    result = verify_pdf(sloppy_qc_signed_pdf)
+
+    item = result.items[0]
+    assert item.level == SignatureLevel.ADVANCED
+    assert item.type == SignatureType.SIGNATURE
+    assert 'ambiguous' in item.technical_detail
+    assert 'QcType' in item.technical_detail
+    # Conservative: never over-claim qualified on an ambiguous certificate.
+    assert 'declares this a qualified' not in item.plain_explanation
 
 
 def test_modified_after_signing_is_detected(tampered_signed_pdf):
