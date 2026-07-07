@@ -4,6 +4,11 @@ Personal project: hosted web service that verifies digital signatures, seals,
 and timestamps in PDFs against the eIDAS framework, with radically legible UX.
 Full requirements: see PRD.md — treat it as the source of truth.
 
+## Current status
+
+See PROGRESS.md for what's done, key implementation decisions, and what's
+next — read it first at the start of a new session before making changes.
+
 ## Architecture rules (non-negotiable)
 - `core/` — pure Python validation package (`eidas_inspect_core`), zero web deps.
   pyHanko does crypto/PAdES; we add qcStatements parsing, EU Trusted List
