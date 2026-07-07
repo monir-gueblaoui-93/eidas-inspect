@@ -1,0 +1,24 @@
+[project]
+name = "eidas-inspect-core"
+version = "0.1.0"
+description = "Pure Python validation core for eidas-inspect: signature discovery, integrity checking, and plain-language eIDAS verdict mapping."
+requires-python = ">=3.12"
+dependencies = [
+    "pyhanko>=0.25.0",
+    "pyhanko-certvalidator>=0.26.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["eidas_inspect_core*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
