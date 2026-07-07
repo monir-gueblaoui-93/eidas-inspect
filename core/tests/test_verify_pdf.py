@@ -30,6 +30,7 @@ def test_signed_pdf_is_read_intact_with_level_and_trust_unknown(signed_pdf):
     assert item.integrity.intact is True
     assert item.integrity.signature_valid is True
     assert item.integrity.modified_after_signing is False
+    assert item.integrity.lta_extended is False
     assert item.signer_name == 'Test Signer'
     assert item.issuing_tsp == 'Test QTSP'
     assert item.signing_time is not None
@@ -44,7 +45,22 @@ def test_modified_after_signing_is_detected(tampered_signed_pdf):
     assert item.integrity.intact is True
     assert item.integrity.signature_valid is True
     assert item.integrity.modified_after_signing is True
+    assert item.integrity.lta_extended is False
     assert 'changed after' in item.plain_explanation
+
+
+def test_lta_extension_is_not_treated_as_tampering(lta_extended_signed_pdf):
+    result = verify_pdf(lta_extended_signed_pdf)
+
+    signature_item = next(
+        i for i in result.items if i.type == SignatureType.SIGNATURE
+    )
+    assert signature_item.integrity.intact is True
+    assert signature_item.integrity.signature_valid is True
+    assert signature_item.integrity.modified_after_signing is False
+    assert signature_item.integrity.lta_extended is True
+    assert 'extended' in signature_item.plain_explanation
+    assert result.verdict != VerificationVerdict.NOT_TRUSTED
 
 
 def test_corrupted_pdf_raises_typed_error():

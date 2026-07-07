@@ -1,11 +1,12 @@
 import pytest
 
 from pdf_fixtures import (
-    append_incremental_junk,
+    add_lta_timestamp,
     build_encrypted_pdf,
     build_minimal_pdf,
     generate_self_signed_signer,
     sign_pdf_bytes,
+    tamper_page_after_signing,
 )
 
 
@@ -26,7 +27,12 @@ def signed_pdf(unsigned_pdf, signer):
 
 @pytest.fixture
 def tampered_signed_pdf(signed_pdf):
-    return append_incremental_junk(signed_pdf)
+    return tamper_page_after_signing(signed_pdf)
+
+
+@pytest.fixture
+def lta_extended_signed_pdf(signed_pdf):
+    return add_lta_timestamp(signed_pdf)
 
 
 @pytest.fixture

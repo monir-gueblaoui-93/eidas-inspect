@@ -8,10 +8,12 @@ from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
+from pyhanko.pdf_utils import generic
 from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
 from pyhanko.pdf_utils.reader import PdfFileReader
 from pyhanko.pdf_utils.writer import PageObject, PdfFileWriter
-from pyhanko.sign import PdfSignatureMetadata, SimpleSigner, sign_pdf
+from pyhanko.sign import PdfSignatureMetadata, PdfTimeStamper, SimpleSigner, sign_pdf
+from pyhanko.sign.timestamps import DummyTimeStamper
 from pyhanko_certvalidator.registry import SimpleCertificateStore
 
 
@@ -80,17 +82,36 @@ def build_encrypted_pdf(password: str) -> bytes:
     return buf.getvalue()
 
 
-def append_incremental_junk(pdf_bytes: bytes) -> bytes:
-    """Append a trivial incremental update after the file has been signed,
-    to simulate modification-after-signing."""
-    from pyhanko.pdf_utils import generic
+def add_lta_timestamp(pdf_bytes: bytes) -> bytes:
+    """Append a document timestamp after signing, as PAdES-LTA permits.
 
-    w = IncrementalPdfFileWriter(io.BytesIO(pdf_bytes), strict=False)
-    w.set_info(
-        generic.DictionaryObject(
-            {generic.pdf_name('/Title'): generic.pdf_string('tampered')}
-        )
+    Uses pyHanko's own ``DummyTimeStamper`` (a local, self-signed TSA stand-in
+    with no network calls) so the resulting incremental update is classified
+    by pyHanko's diff analysis as ``ModificationLevel.LTA_UPDATES``, not
+    tampering.
+    """
+    tsa_signer = generate_self_signed_signer(
+        common_name='Test TSA', organization='Test TSA Org'
     )
+    timestamper = DummyTimeStamper(
+        tsa_cert=tsa_signer.signing_cert, tsa_key=tsa_signer.signing_key
+    )
+    w = IncrementalPdfFileWriter(io.BytesIO(pdf_bytes), strict=False)
+    out = PdfTimeStamper(timestamper).timestamp_pdf(w, 'sha256')
+    return out.getvalue()
+
+
+def tamper_page_after_signing(pdf_bytes: bytes) -> bytes:
+    """Mutate the first page's content after signing, as an incremental
+    update, to simulate genuine tampering (not a permissible LTA update)."""
+    w = IncrementalPdfFileWriter(io.BytesIO(pdf_bytes), strict=False)
+    kids = w.root['/Pages']['/Kids']
+    page_ref = kids.raw_get(0)
+    page_obj = page_ref.get_object()
+    page_obj[generic.pdf_name('/MediaBox')] = generic.ArrayObject(
+        map(generic.FloatObject, (0, 0, 999, 999))
+    )
+    w.mark_update(page_ref)
     buf = io.BytesIO()
     w.write(buf)
     return buf.getvalue()

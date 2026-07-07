@@ -6,3 +6,5 @@ __pycache__/
 node_modules/
 dist/
 build/
+test-real.pdf
+Demo document.pdf

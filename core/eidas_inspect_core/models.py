@@ -49,8 +49,14 @@ class IntegrityStatus:
     """The signature covers the entire file, with no unsigned trailing changes."""
 
     modified_after_signing: bool | None
-    """Whether the document was changed after this signature was applied.
-    ``None`` if this could not be determined."""
+    """Whether the document was tampered with after this signature was applied.
+    Excludes permissible PAdES long-term-archival updates (see
+    :attr:`lta_extended`). ``None`` if this could not be determined."""
+
+    lta_extended: bool
+    """Whether the only changes after this signature was applied were
+    permissible long-term-archival additions (e.g. a document timestamp or
+    DSS update per PAdES-LTA). A neutral/positive fact, not a warning."""
 
 
 @dataclass(frozen=True)
