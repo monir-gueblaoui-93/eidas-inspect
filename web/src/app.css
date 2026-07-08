@@ -13,7 +13,7 @@ body {
 
 body {
   background: var(--color-bg);
-  color: var(--color-ink);
+  color: var(--color-text);
   font-family: var(--font-body);
   font-size: var(--text-base);
   line-height: 1.5;
@@ -55,9 +55,11 @@ input {
   white-space: nowrap;
 }
 
-/* Warm, visible focus ring everywhere — keyboard nav must stay legible. */
+/* Focus ring uses --color-focus (amber-brown), not the lemon accent —
+   raw accent clears only ~1.4:1 against these light surfaces, well under
+   the 3:1 a focus indicator needs to actually be visible. */
 :focus-visible {
-  outline: 3px solid var(--color-brand);
+  outline: 3px solid var(--color-focus);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
 }
@@ -94,7 +96,7 @@ input {
   font-size: var(--text-sm);
   font-weight: 700;
   cursor: pointer;
-  transition: transform 0.12s ease, background-color 0.12s ease, box-shadow 0.12s ease;
+  transition: transform 0.12s ease, background-color 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
 }
 
 .btn:active {
@@ -106,35 +108,43 @@ input {
   cursor: not-allowed;
 }
 
+/* Primary: lemon accent bg + dark olive text — never white on lemon,
+   contrast fails. */
 .btn--primary {
-  background: var(--color-brand);
-  color: var(--color-brand-ink);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
   box-shadow: var(--shadow-card);
 }
 
 .btn--primary:hover:not(:disabled) {
-  background: var(--color-brand-dark);
+  background: var(--color-accent-hover);
 }
 
+.btn--primary:active:not(:disabled) {
+  background: var(--color-accent-active);
+}
+
+/* Secondary: transparent bg, border-strong, plain text color — no accent. */
 .btn--secondary {
-  background: var(--color-surface);
-  color: var(--color-brand);
-  border: 1.5px solid var(--color-brand);
+  background: transparent;
+  color: var(--color-text);
+  border: 1.5px solid var(--color-border-strong);
 }
 
 .btn--secondary:hover:not(:disabled) {
-  background: var(--color-brand-soft);
+  background: var(--color-surface-sunken);
+  border-color: var(--color-text-secondary);
 }
 
 .btn--ghost {
   background: transparent;
-  color: var(--color-ink-soft);
+  color: var(--color-text-secondary);
   padding: 10px 16px;
 }
 
 .btn--ghost:hover:not(:disabled) {
-  color: var(--color-ink);
-  background: var(--color-surface-alt);
+  color: var(--color-text);
+  background: var(--color-surface-sunken);
 }
 
 /* ---------- Landing ---------- */
@@ -146,14 +156,16 @@ input {
 .landing__headline {
   font-size: var(--text-4xl);
   font-weight: 600;
-  color: var(--color-ink);
+  color: var(--color-text);
   max-width: 15ch;
   margin: 0 auto var(--space-4);
 }
 
+/* Emphasis uses the amber-brown link color, not raw accent — lemon fails
+   contrast even at this size (~1.4:1, well under the 3:1 large-text floor). */
 .landing__headline em {
   font-style: italic;
-  color: var(--color-brand);
+  color: var(--verdict-partial-icon);
 }
 
 @media (max-width: 640px) {
@@ -164,7 +176,7 @@ input {
 
 .landing__subhead {
   font-size: var(--text-lg);
-  color: var(--color-ink-soft);
+  color: var(--color-text-secondary);
   max-width: 46ch;
   margin: 0 auto var(--space-6);
 }
@@ -174,10 +186,10 @@ input {
   align-items: center;
   gap: var(--space-2);
   margin-top: var(--space-5);
-  color: var(--color-trusted-dark);
+  color: var(--verdict-trusted-text);
   font-weight: 600;
   font-size: var(--text-sm);
-  background: var(--color-trusted-soft);
+  background: var(--verdict-trusted-bg);
   padding: var(--space-2) var(--space-4);
   border-radius: var(--radius-pill);
 }
@@ -200,19 +212,23 @@ input {
   }
 }
 
+/* Hover/dragging border uses --color-focus (amber-brown, ~3.1:1) rather
+   than the lemon accent, which would barely register against the cream
+   surface; background tint uses --color-accent-subtle, the token named
+   for exactly this ("focus tints, selected states"). */
 .upload-zone:hover {
-  border-color: var(--color-brand);
-  background: var(--color-brand-soft);
+  border-color: var(--color-focus);
+  background: var(--color-accent-subtle);
 }
 
 .upload-zone--dragging {
-  border-color: var(--color-brand);
-  background: var(--color-brand-soft);
+  border-color: var(--color-focus);
+  background: var(--color-accent-subtle);
   transform: scale(1.015);
 }
 
 .upload-zone__icon {
-  color: var(--color-brand);
+  color: var(--color-on-accent);
   margin-bottom: var(--space-3);
 }
 
@@ -224,7 +240,7 @@ input {
 }
 
 .upload-zone__hint {
-  color: var(--color-ink-soft);
+  color: var(--color-text-secondary);
   font-size: var(--text-sm);
   margin: 0;
 }
@@ -234,8 +250,8 @@ input {
   display: flex;
   align-items: flex-start;
   gap: var(--space-2);
-  background: var(--color-partial-soft);
-  color: var(--color-partial-dark);
+  background: var(--verdict-partial-bg);
+  color: var(--verdict-partial-text);
   border-radius: var(--radius-md);
   padding: var(--space-3) var(--space-4);
   max-width: 480px;
@@ -262,12 +278,12 @@ input {
 }
 
 .password-prompt__icon {
-  color: var(--color-brand);
+  color: var(--color-on-accent);
   margin-bottom: var(--space-2);
 }
 
 .password-prompt__file {
-  color: var(--color-ink-soft);
+  color: var(--color-text-secondary);
   font-size: var(--text-sm);
   word-break: break-all;
   margin-bottom: var(--space-5);
@@ -291,7 +307,7 @@ input {
 }
 
 .password-prompt__reassurance {
-  color: var(--color-ink-faint);
+  color: var(--color-text-muted);
   font-size: var(--text-xs);
   margin: var(--space-4) 0 0;
 }
@@ -322,7 +338,7 @@ input {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  color: var(--color-ink-faint);
+  color: var(--color-text-muted);
   transition: color 0.25s ease;
 }
 
@@ -334,8 +350,8 @@ input {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--color-surface-alt);
-  color: var(--color-ink-faint);
+  background: var(--color-surface-sunken);
+  color: var(--color-text-muted);
   transition: background-color 0.25s ease, color 0.25s ease, transform 0.25s ease;
 }
 
@@ -345,31 +361,35 @@ input {
 }
 
 .verifying__step--active {
-  color: var(--color-ink);
+  color: var(--color-text);
 }
 
+/* Active step: lemon accent, per the rule that the accent marks the
+   in-progress indicator specifically. */
 .verifying__step--active .verifying__badge {
-  background: var(--color-brand);
-  color: var(--color-brand-ink);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
   animation: pulse 1.1s ease-in-out infinite;
 }
 
 .verifying__step--done {
-  color: var(--color-ink-soft);
+  color: var(--color-text-secondary);
 }
 
+/* Completed steps: verdict-trusted green, not the accent — a finished
+   check is a trust signal, not an in-progress one. */
 .verifying__step--done .verifying__badge {
-  background: var(--color-trusted-soft);
-  color: var(--color-trusted-dark);
+  background: var(--verdict-trusted-bg);
+  color: var(--verdict-trusted-icon);
 }
 
 @keyframes pulse {
   0%,
   100% {
-    box-shadow: 0 0 0 0 rgba(122, 64, 105, 0.4);
+    box-shadow: 0 0 0 0 rgba(242, 212, 43, 0.55);
   }
   50% {
-    box-shadow: 0 0 0 8px rgba(122, 64, 105, 0);
+    box-shadow: 0 0 0 8px rgba(242, 212, 43, 0);
   }
 }
 
@@ -397,23 +417,23 @@ input {
 }
 
 .verdict-banner--trusted {
-  background: var(--color-trusted-soft);
-  color: var(--color-trusted-dark);
+  background: var(--verdict-trusted-bg);
+  color: var(--verdict-trusted-text);
 }
 
 .verdict-banner--partial {
-  background: var(--color-partial-soft);
-  color: var(--color-partial-dark);
+  background: var(--verdict-partial-bg);
+  color: var(--verdict-partial-text);
 }
 
 .verdict-banner--not-trusted {
-  background: var(--color-not-trusted-soft);
-  color: var(--color-not-trusted-dark);
+  background: var(--verdict-danger-bg);
+  color: var(--verdict-danger-text);
 }
 
 .verdict-banner--neutral {
-  background: var(--color-neutral-soft);
-  color: var(--color-neutral-dark);
+  background: var(--verdict-neutral-bg);
+  color: var(--verdict-neutral-text);
 }
 
 /* ---------- Signature cards ---------- */
@@ -432,19 +452,19 @@ input {
 }
 
 .sig-card--trusted {
-  border-left-color: var(--color-trusted);
+  border-left-color: var(--verdict-trusted-border);
 }
 
 .sig-card--partial {
-  border-left-color: var(--color-partial);
+  border-left-color: var(--verdict-partial-border);
 }
 
 .sig-card--not-trusted {
-  border-left-color: var(--color-not-trusted);
+  border-left-color: var(--verdict-danger-border);
 }
 
 .sig-card--neutral {
-  border-left-color: var(--color-neutral);
+  border-left-color: var(--verdict-neutral-border);
 }
 
 .sig-card__header {
@@ -474,23 +494,23 @@ input {
 }
 
 .sig-card__badge--trusted {
-  background: var(--color-trusted-soft);
-  color: var(--color-trusted-dark);
+  background: var(--verdict-trusted-bg);
+  color: var(--verdict-trusted-text);
 }
 
 .sig-card__badge--partial {
-  background: var(--color-partial-soft);
-  color: var(--color-partial-dark);
+  background: var(--verdict-partial-bg);
+  color: var(--verdict-partial-text);
 }
 
 .sig-card__badge--not-trusted {
-  background: var(--color-not-trusted-soft);
-  color: var(--color-not-trusted-dark);
+  background: var(--verdict-danger-bg);
+  color: var(--verdict-danger-text);
 }
 
 .sig-card__badge--neutral {
-  background: var(--color-neutral-soft);
-  color: var(--color-neutral-dark);
+  background: var(--verdict-neutral-bg);
+  color: var(--verdict-neutral-text);
 }
 
 .sig-card__lead {
@@ -523,7 +543,7 @@ input {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--color-ink-faint);
+  color: var(--color-text-muted);
 }
 
 .sig-field__value {
@@ -535,19 +555,19 @@ input {
 }
 
 .sig-field__value--trusted {
-  color: var(--color-trusted-dark);
+  color: var(--verdict-trusted-text);
 }
 
 .sig-field__value--partial {
-  color: var(--color-partial-dark);
+  color: var(--verdict-partial-text);
 }
 
 .sig-field__value--not-trusted {
-  color: var(--color-not-trusted-dark);
+  color: var(--verdict-danger-text);
 }
 
 .sig-field__value--neutral {
-  color: var(--color-ink-soft);
+  color: var(--verdict-neutral-text);
 }
 
 .sig-field__value svg {
@@ -556,7 +576,7 @@ input {
 
 .sig-field__sub {
   font-size: var(--text-xs);
-  color: var(--color-ink-faint);
+  color: var(--color-text-muted);
   font-weight: 500;
 }
 
@@ -572,7 +592,7 @@ input {
   gap: var(--space-2);
   background: none;
   border: none;
-  color: var(--color-ink-soft);
+  color: var(--color-text-secondary);
   font-weight: 700;
   font-size: var(--text-sm);
   cursor: pointer;
@@ -590,8 +610,8 @@ input {
 .sig-card__technical-body {
   margin: var(--space-2) 0 0;
   font-size: var(--text-sm);
-  color: var(--color-ink-soft);
-  background: var(--color-surface-alt);
+  color: var(--color-text-secondary);
+  background: var(--color-surface-sunken);
   border-radius: var(--radius-sm);
   padding: var(--space-3);
 }
@@ -613,7 +633,7 @@ input {
 }
 
 .download-report__error {
-  color: var(--color-not-trusted-dark);
+  color: var(--verdict-danger-text);
   font-size: var(--text-xs);
   margin: var(--space-2) 0 0;
 }
@@ -630,13 +650,13 @@ input {
 }
 
 .unsigned-state__icon {
-  color: var(--color-neutral);
+  color: var(--verdict-neutral-text);
   margin-bottom: var(--space-2);
 }
 
 .unsigned-state__suggestions {
   text-align: left;
-  background: var(--color-surface-alt);
+  background: var(--color-surface-sunken);
   border-radius: var(--radius-md);
   padding: var(--space-4) var(--space-5);
   margin: var(--space-5) 0;
@@ -649,7 +669,7 @@ input {
 
 .unsigned-state__suggestions li {
   margin-bottom: var(--space-2);
-  color: var(--color-ink-soft);
+  color: var(--color-text-secondary);
 }
 
 /* ---------- Glossary term ---------- */
@@ -679,8 +699,8 @@ input {
 .term-panel {
   display: block;
   margin-top: var(--space-2);
-  background: var(--color-brand-soft);
-  color: var(--color-ink);
+  background: var(--color-accent-subtle);
+  color: var(--color-text);
   border-radius: var(--radius-sm);
   padding: var(--space-3);
   font-size: var(--text-sm);
@@ -694,7 +714,7 @@ input {
   margin: 0 auto;
   padding: var(--space-5) var(--space-4) var(--space-7);
   text-align: center;
-  color: var(--color-ink-faint);
+  color: var(--color-text-muted);
   font-size: var(--text-xs);
 }
 

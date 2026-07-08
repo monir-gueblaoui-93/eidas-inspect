@@ -1,52 +1,67 @@
 /*
- * Design tokens for eidas-inspect.
+ * Design tokens for eidas-inspect — "Limoncello" palette.
  *
- * Brief: consumer-friendly with personality — warm and slightly fun, not
- * corporate SaaS minimalism, and deliberately not Scrive's palette (their
- * look leans cool, green-dominant, and clinical). This leans warm paper +
- * plum instead, with a green/amber/red/taupe traffic-light set chosen to
- * sit naturally against that base rather than looking bolted on.
+ * Pale lemon-cream surfaces, olive ink, bright lemon accent. The accent is
+ * a UI-interaction color only (buttons, focus, selected states) — it fails
+ * WCAG contrast as a foreground color on these light surfaces (~1.4:1), so
+ * it is never used for text, icons, or borders on their own; those read
+ * against --color-focus (an amber-brown, ~3.1:1, meant for exactly this)
+ * or the dark olive tokens instead. Verdict colors are a separate family
+ * on purpose (rule: lemon never appears inside a verdict chip or banner —
+ * amber/honey is PARTIAL's color, not the brand's).
  *
- * Type pairing: Fraunces (a soft, characterful serif with real personality
- * at display sizes) for headlines, paired with Manrope (a friendly rounded
- * geometric sans) for everything functional. Serif-for-voice /
- * sans-for-interface is the distinctive pairing — most competitors
- * (EU DSS demo, Adobe) use one utilitarian sans for everything.
+ * Type pairing unchanged: Fraunces (display) + Manrope (body).
  */
 
 :root {
-  /* ---- Color: base ---- */
-  --color-bg: #fbf3e7; /* warm cream page background */
-  --color-surface: #ffffff; /* card surfaces */
-  --color-surface-alt: #f3e8d7; /* footer, subtle panels */
-  --color-ink: #2b2117; /* primary text — warm near-black, not pure black */
-  --color-ink-soft: #6b5c4c; /* secondary text */
-  --color-ink-faint: #9c8d7a; /* placeholders, disabled */
-  --color-border: #e8d9c2; /* hairline borders */
-  --color-border-strong: #d9c4a3;
+  /* ---- Surfaces ---- */
+  --color-bg: #fdfbef; /* page background — pale lemon-cream */
+  --color-surface: #fffffc; /* cards, elevated panels */
+  --color-surface-sunken: #f6f3df; /* drop zone idle, subtle wells */
 
-  /* ---- Color: brand (interactive) ---- */
-  --color-brand: #7a4069; /* plum — buttons, links, focus, progress */
-  --color-brand-dark: #5c2f4e;
-  --color-brand-soft: #efdce8;
-  --color-brand-ink: #fffaf6;
+  /* ---- Text: olive ink hierarchy ---- */
+  --color-text: #3a3d28; /* primary */
+  --color-text-secondary: #6e7154;
+  --color-text-muted: #737459; /* darkened from spec's #8F916F (3.1:1) to
+    clear 4.5:1 on --color-bg/--color-surface for small text — same hue,
+    lightness only, per the "keep hue, darken text" contrast rule. */
 
-  /* ---- Color: traffic-light verdicts ---- */
-  --color-trusted: #2f8f5b;
-  --color-trusted-dark: #1f6f44;
-  --color-trusted-soft: #deefe1;
+  /* ---- Borders ---- */
+  --color-border: #e3e0c8;
+  --color-border-strong: #c9c6a5;
 
-  --color-partial: #c8862a;
-  --color-partial-dark: #9c661c;
-  --color-partial-soft: #f6e8ce;
+  /* ---- Accent: bright lemon — interactive elements only ---- */
+  --color-accent: #f2d42b;
+  --color-accent-hover: #e5c51b;
+  --color-accent-active: #d4b614;
+  --color-on-accent: #4a3d04; /* text/icons on lemon — never white */
+  --color-accent-subtle: #fbf3c8; /* focus tints, selected states */
 
-  --color-not-trusted: #b23a2e;
-  --color-not-trusted-dark: #8c2c22;
-  --color-not-trusted-soft: #f3dcd6;
+  /* ---- Focus ring: amber-brown, not lemon (lemon fails 3:1 on cream) ---- */
+  --color-focus: #b08a2e;
 
-  --color-neutral: #6b6255;
-  --color-neutral-dark: #4f483e;
-  --color-neutral-soft: #eae3d6;
+  /* ---- Verdict: TRUSTED — fresh green, cooler than any olive UI element ---- */
+  --verdict-trusted-bg: #e6f0dc;
+  --verdict-trusted-border: #4c7c3a;
+  --verdict-trusted-text: #2e5122;
+  --verdict-trusted-icon: #3a632b;
+
+  /* ---- Verdict: PARTIAL — deep honey, pushed brown so it never reads as the lemon accent ---- */
+  --verdict-partial-bg: #f1e3be;
+  --verdict-partial-border: #b08a2e;
+  --verdict-partial-text: #6f5410;
+  --verdict-partial-icon: #8a6a14;
+
+  /* ---- Verdict: NOT_TRUSTED ---- */
+  --verdict-danger-bg: #f4dcd4;
+  --verdict-danger-border: #c05238;
+  --verdict-danger-text: #8e3320;
+  --verdict-danger-icon: #a73e27;
+
+  /* ---- Verdict: NO_SIGNATURES — neutral, not an error ---- */
+  --verdict-neutral-bg: #efeee2;
+  --verdict-neutral-border: #b9b69a;
+  --verdict-neutral-text: #5b5e44;
 
   /* ---- Type ---- */
   --font-display: 'Fraunces', ui-serif, Georgia, serif;
@@ -78,8 +93,8 @@
   --radius-lg: 24px;
   --radius-pill: 999px;
 
-  --shadow-card: 0 1px 2px rgba(43, 33, 23, 0.06), 0 4px 16px rgba(43, 33, 23, 0.07);
-  --shadow-pop: 0 12px 32px rgba(43, 33, 23, 0.16);
+  --shadow-card: 0 1px 2px rgba(58, 61, 40, 0.06), 0 4px 16px rgba(58, 61, 40, 0.07);
+  --shadow-pop: 0 12px 32px rgba(58, 61, 40, 0.16);
 
   --container-width: 760px;
 }
