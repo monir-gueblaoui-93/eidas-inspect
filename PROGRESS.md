@@ -577,26 +577,119 @@ validation the product could never say `TRUSTED` on real documents.
   document's own OCSP proof, captured at signing time, is what confirmed
   a certificate that had long since expired by verification time.
 
-## Next: Day 4+ per BUILD_GUIDE.md — the React frontend
+## Done (Day 4): the React frontend (`web/`)
 
-`api/` is done enough to build against: `POST /api/verify` (multipart +
-optional password → full JSON verdict), `POST /api/report` (JSON → PDF),
-`GET /api/health`, typed errors, rate limiting. Day 4/5 per BUILD_GUIDE.md:
+Built against the already-shipped `api/` layer: `POST /api/verify`
+(multipart + optional password → full JSON verdict), `POST /api/report`
+(JSON → PDF), typed error envelope, rate limiting. Plain Vite + React,
+no router (single-page state machine), no UI framework or icon library --
+hand-rolled `currentColor` SVG icons in `src/icons.jsx` to keep the bundle
+small and the visual language consistent.
 
-1. Landing page (drop zone / tap-to-upload, ephemerality trust promise),
-   password-prompt state, animated step-sequence loading state, verdict
-   page (traffic-light banner using `plain_summary` + per-item cards using
-   the six fields), neutral unsigned state with signing suggestions,
-   educational tooltips (Qualified/QES/QSeal/Trusted List/timestamp),
-   download-report button wired to `/api/report`, friendly error/rate-limit
-   states surfaced from the `error.code`/`error.message` envelope.
-   Mobile-first responsive, per PRD §3/§7.
-2. A pure visual design pass: distinctive type pairing, a palette where
-   the traffic-light colors feel native, explicitly not Scrive's brand.
-3. Wire the built frontend into `api/static/` (currently a placeholder
-   `index.html`) so the FastAPI app serves it from the same origin/port.
-4. Root Dockerfile building both `core`+`api` (Python) and the built
-   frontend (Node) into one image, per BUILD_GUIDE.md Day 6 -- not started.
+- **Design tokens (`src/theme.css`)**: warm cream background + near-black
+  ink, a plum/berry brand accent for all interactive elements (buttons,
+  links, focus rings), and a green/amber/red/taupe traffic-light set tuned
+  to sit naturally against that base rather than the more common
+  blue-on-white SaaS look -- and deliberately not Scrive's green-dominant
+  palette. Type pairing is Fraunces (a characterful serif with real
+  personality at display sizes) for headlines against Manrope (a rounded,
+  friendly geometric sans) for everything functional -- serif-for-voice /
+  sans-for-interface, distinct from the single-utilitarian-sans look of
+  the EU DSS demo or Adobe Reader. Full token list -- colors, spacing
+  scale, radii, shadows -- lives in that one file for easy iteration.
+- **State machine in `App.jsx`**: `landing → (password) → verifying →
+  result`, driven by explicit phase state rather than a router. The
+  upload handler runs client-side pre-checks (PDF-only, 50 MB) before
+  ever calling the API, matching the API's own `not_a_pdf`/`file_too_large`
+  errors so both layers agree on the same limits.
+- **Verifying animation is paced independently of the real request.**
+  `/api/verify` is synchronous and reports no real progress, so
+  `VerifyingAnimation` advances through the five real stages ("Reading
+  document" → "Finding signatures" → "Checking integrity" → "Consulting
+  EU Trusted Lists" → "Checking revocation status") on its own timer.
+  Its `isComplete` flag is read via a ref inside a self-scheduling
+  `setTimeout` loop (not as a `useEffect` dependency) specifically so the
+  sequence *continues* from wherever it is and switches to a faster pace
+  when the real response lands, rather than restarting from step 0 --
+  a real bug caught and fixed during this build, not a hypothetical one.
+  If the API is slower than the animation, it holds and pulses on the
+  last stage rather than looking stuck or racing ahead of the truth.
+- **Six-field signature cards, plus a seventh.** `Type`/`Level`/`Who`/
+  `Integrity`/`When`/`Trust chain` per the PRD, plus a `Revocation` row
+  that renders `revocation_source` directly (`embedded` vs `live`) rather
+  than parsing it out of `technical_detail` prose -- exactly the
+  consumption path that field was added for during the point-in-time
+  validation work. `lta_extended` renders as a positive "Intact --
+  extended for long-term validation" line, never a warning. A `verify_pdf`
+  `timestamp_quality` of `unknown` (a cryptographically verified embedded
+  timestamp whose TSA isn't confirmed qualified -- distinct from
+  `claimed_only`, an unverified self-reported time) gets its own distinct
+  wording rather than being collapsed into either extreme.
+  `src/itemPresentation.js` holds this raw-JSON-to-plain-language mapping
+  as pure functions, kept separate from the card markup.
+- **PARTIAL banner distinguishes its three wording buckets** (issues /
+  unconfirmed / valid-but-not-qualified) both in text -- `plain_summary`
+  already carries the right sentence for each per the verdict-logic work
+  -- and visually, via `verdict_breakdown` picking a different icon per
+  bucket (warning triangle for real issues, info circle for an honest
+  unconfirmed gap, check circle for "simply not qualified").
+- **Educational glossary (`Term` component + `src/glossary.js`)**:
+  Qualified, QES, QSeal, EU Trusted List, and qualified timestamp, each
+  wired inline wherever the term appears (the Level field, the Trust
+  chain field, the When field). Implemented as a click-to-expand block
+  that pushes into normal document flow directly under the trigger word,
+  not an absolutely-positioned popover -- avoids all mobile
+  viewport-clipping edge cases that come with tooltip positioning.
+- **Unsigned state is neutral, not an error**: explains that a scanned
+  handwritten signature isn't a digital signature, with vendor-neutral
+  signing suggestions, per PRD's explicit "must not feel like an error"
+  requirement.
+- **Report download** wired to `POST /api/report`, converting the
+  returned blob to a same-tab download via a throwaway object URL,
+  revoked immediately after the click to avoid leaking memory.
+- **Vite dev proxy** (`vite.config.js`) forwards `/api` to
+  `localhost:8000`, so the dev frontend and a locally running API share
+  an origin with no CORS configuration needed -- and none is needed in
+  production either, once the built frontend is served from `api/static/`
+  (Day 6).
+- **Verified against the live local API**, not just by inspection:
+  `Demo document.pdf` → `partial`, "the signature is valid but not
+  qualified" (Advanced-only cert, exactly the PRD's PARTIAL path);
+  `qes_document.pdf` → still `trusted` with `revocation_source: embedded`,
+  confirming the point-in-time validation work renders correctly end to
+  end through this new layer; unsigned PDF → `no-signatures`; not-a-PDF,
+  corrupted PDF, missing/wrong/correct password → each error code exactly
+  matches what `App.jsx` branches on; `/api/report` round-tripped a real
+  result into a real, valid single-page PDF. All done via direct API
+  calls through the Vite proxy (matching exactly what the React code
+  consumes) plus a clean `vite build` and a clean `oxlint` pass -- **not
+  yet visually confirmed in an actual browser**: this environment has no
+  headless browser available, and an attempted throwaway Playwright
+  Chromium install stalled twice at 90% on a slow connection and was
+  abandoned. Stated plainly rather than claimed: the data layer, error
+  handling, and every code path are verified; the actual pixels have not
+  been.
+- **Rate-limit care while testing**: manual `curl` testing against the
+  live API consumes the same 10/hour-per-IP quota real users get. The API
+  process was restarted partway through this session specifically to
+  reset the in-memory counter before handing off for manual browser
+  testing, to avoid accidentally locking out that first real test.
+
+## Next: Day 6 -- deploy
+
+1. **First, a real browser pass** (this environment couldn't do one): run
+   the full flow on desktop and a phone-sized viewport, including the
+   qes_document.pdf TRUSTED path (not yet seen rendered), Demo
+   document.pdf's PARTIAL path, unsigned/wrong-password/rate-limit edge
+   states, and the report download.
+2. Wire the built frontend into `api/static/` (currently a placeholder
+   `index.html`) so the FastAPI app serves it from the same origin/port
+   in production.
+3. Root Dockerfile building both `core`+`api` (Python) and the built
+   frontend (Node) into one image, per BUILD_GUIDE.md Day 6 -- not
+   started. Deploy to Railway or Render per BUILD_GUIDE.md.
+4. Day 7 polish: README demo GIF, a small real-world test-document set
+   beyond the two documents used so far.
 
 Also still open from earlier days:
 - The Subject-`C=` territory-attribution heuristic remains deliberately

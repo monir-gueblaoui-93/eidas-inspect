@@ -1,0 +1,85 @@
+/*
+ * Design tokens for eidas-inspect.
+ *
+ * Brief: consumer-friendly with personality — warm and slightly fun, not
+ * corporate SaaS minimalism, and deliberately not Scrive's palette (their
+ * look leans cool, green-dominant, and clinical). This leans warm paper +
+ * plum instead, with a green/amber/red/taupe traffic-light set chosen to
+ * sit naturally against that base rather than looking bolted on.
+ *
+ * Type pairing: Fraunces (a soft, characterful serif with real personality
+ * at display sizes) for headlines, paired with Manrope (a friendly rounded
+ * geometric sans) for everything functional. Serif-for-voice /
+ * sans-for-interface is the distinctive pairing — most competitors
+ * (EU DSS demo, Adobe) use one utilitarian sans for everything.
+ */
+
+:root {
+  /* ---- Color: base ---- */
+  --color-bg: #fbf3e7; /* warm cream page background */
+  --color-surface: #ffffff; /* card surfaces */
+  --color-surface-alt: #f3e8d7; /* footer, subtle panels */
+  --color-ink: #2b2117; /* primary text — warm near-black, not pure black */
+  --color-ink-soft: #6b5c4c; /* secondary text */
+  --color-ink-faint: #9c8d7a; /* placeholders, disabled */
+  --color-border: #e8d9c2; /* hairline borders */
+  --color-border-strong: #d9c4a3;
+
+  /* ---- Color: brand (interactive) ---- */
+  --color-brand: #7a4069; /* plum — buttons, links, focus, progress */
+  --color-brand-dark: #5c2f4e;
+  --color-brand-soft: #efdce8;
+  --color-brand-ink: #fffaf6;
+
+  /* ---- Color: traffic-light verdicts ---- */
+  --color-trusted: #2f8f5b;
+  --color-trusted-dark: #1f6f44;
+  --color-trusted-soft: #deefe1;
+
+  --color-partial: #c8862a;
+  --color-partial-dark: #9c661c;
+  --color-partial-soft: #f6e8ce;
+
+  --color-not-trusted: #b23a2e;
+  --color-not-trusted-dark: #8c2c22;
+  --color-not-trusted-soft: #f3dcd6;
+
+  --color-neutral: #6b6255;
+  --color-neutral-dark: #4f483e;
+  --color-neutral-soft: #eae3d6;
+
+  /* ---- Type ---- */
+  --font-display: 'Fraunces', ui-serif, Georgia, serif;
+  --font-body: 'Manrope', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+
+  --text-xs: 0.8125rem;
+  --text-sm: 0.9375rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.375rem;
+  --text-2xl: 1.75rem;
+  --text-3xl: 2.25rem;
+  --text-4xl: 3rem;
+
+  /* ---- Spacing scale ---- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+  --space-9: 96px;
+
+  /* ---- Shape & elevation ---- */
+  --radius-sm: 10px;
+  --radius-md: 16px;
+  --radius-lg: 24px;
+  --radius-pill: 999px;
+
+  --shadow-card: 0 1px 2px rgba(43, 33, 23, 0.06), 0 4px 16px rgba(43, 33, 23, 0.07);
+  --shadow-pop: 0 12px 32px rgba(43, 33, 23, 0.16);
+
+  --container-width: 760px;
+}
