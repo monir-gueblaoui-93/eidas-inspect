@@ -24,6 +24,7 @@ from pyhanko_certvalidator.path import ValidationPath
 
 from .errors import CorruptedPdfError, IncorrectPasswordError, PasswordRequiredError
 from .models import (
+    CertificateDetails,
     IntegrityStatus,
     RevocationSource,
     RevocationStatus,
@@ -32,6 +33,7 @@ from .models import (
     SignatureType,
     TimestampQuality,
     TrustChainStatus,
+    TrustMatch,
     VerdictBreakdown,
     VerdictReason,
     VerificationResult,
@@ -310,9 +312,10 @@ def _build_signature_item(
 
     coverage_name = status.coverage.name if status.coverage is not None else 'UNKNOWN'
     signing_time, timestamp_quality = _signing_time_info(is_timestamp, status)
+    certificate = _certificate_details(status.signing_cert)
 
     qualification_moment = reference_moment if reference_moment is not None else verified_at
-    trust_chain_status, trust_note = _assess_trust_chain(
+    trust_chain_status, trust_note, trust_match = _assess_trust_chain(
         status.validation_path, qualification_moment, trust_list, verified_at
     )
 
@@ -325,7 +328,7 @@ def _build_signature_item(
         sig_type, level, qc_note = _classify_certificate(qc, integrity)
         embedded_timestamp = status.timestamp_validity
         if embedded_timestamp is not None:
-            ts_trust_status, _ = _assess_trust_chain(
+            ts_trust_status, _, _ = _assess_trust_chain(
                 embedded_timestamp.validation_path,
                 embedded_timestamp.timestamp,
                 trust_list,
@@ -374,6 +377,8 @@ def _build_signature_item(
         revocation_status=revocation_status,
         revocation_source=revocation_source,
         verdict_reason=verdict_reason,
+        certificate=certificate,
+        trust_match=trust_match,
     )
 
 
@@ -498,7 +503,7 @@ def _assess_trust_chain(
     moment: datetime,
     trust_list: TrustListSnapshot | None,
     verified_at: datetime,
-) -> tuple[TrustChainStatus, str | None]:
+) -> tuple[TrustChainStatus, str | None, TrustMatch | None]:
     """Map a PKIX path built against the Trusted List's trust anchors onto
     our trust-chain model.
 
@@ -512,20 +517,29 @@ def _assess_trust_chain(
     have vindicated the issuer, so we report
     :attr:`TrustChainStatus.UNAVAILABLE` instead of guessing in either
     direction.
+
+    The third return value is a :class:`TrustMatch` -- non-``None`` only
+    when a service was actually matched *and* that service's originating
+    territory is known (see
+    :meth:`~.trust_list.registry.TrustListSnapshot.territory_for_service`).
     """
     if trust_list is None:
-        return TrustChainStatus.UNKNOWN, None
+        return TrustChainStatus.UNKNOWN, None, None
 
     if validation_path is None:
         if trust_list.is_degraded(verified_at):
-            return TrustChainStatus.UNAVAILABLE, (
+            return (
+                TrustChainStatus.UNAVAILABLE,
                 'Trusted List data is unavailable or out of date, so the '
                 'issuing certificate authority could not be checked right '
-                'now.'
+                'now.',
+                None,
             )
-        return TrustChainStatus.UNTRUSTED, (
+        return (
+            TrustChainStatus.UNTRUSTED,
             'The issuing certificate authority was not found as a granted '
-            'service on the EU Trusted List.'
+            'service on the EU Trusted List.',
+            None,
         )
 
     result = QualificationAssessor(trust_list.registry).check_entity_cert_qualified(
@@ -537,13 +551,28 @@ def _assess_trust_chain(
             if result.service_definition
             else 'a granted service'
         )
-        return TrustChainStatus.TRUSTED, (
-            f"Matched '{service_name}' as a granted qualified service on "
-            'the EU Trusted List.'
+        territory = trust_list.territory_for_service(result.service_definition)
+        trust_match = (
+            TrustMatch(
+                territory=territory.territory,
+                territory_name=territory.territory_name,
+                trust_service_name=service_name,
+                tl_location_url=territory.tl_location_url,
+            )
+            if territory is not None
+            else None
         )
-    return TrustChainStatus.UNTRUSTED, (
+        return (
+            TrustChainStatus.TRUSTED,
+            f"Matched '{service_name}' as a granted qualified service on "
+            'the EU Trusted List.',
+            trust_match,
+        )
+    return (
+        TrustChainStatus.UNTRUSTED,
         'The issuing certificate authority is on the EU Trusted List but '
-        'was not granted qualified status at the relevant time.'
+        'was not granted qualified status at the relevant time.',
+        None,
     )
 
 
@@ -799,6 +828,38 @@ def _friendly_name(name: x509.Name, preferred_key: str) -> str | None:
         return value
     human_friendly = name.human_friendly
     return human_friendly or None
+
+
+def _name_component(name: x509.Name, key: str) -> str | None:
+    """A single X.509 name attribute (e.g. just the CN, just the O), with
+    no fallback to the full distinguished name -- unlike :func:`_friendly_name`,
+    which is for the existing single-line "Who"/"Certificate issued by"
+    fields. :class:`~.models.CertificateDetails` shows CN and O as
+    separate, explicit facts, so a silent fallback here would blur which
+    one was actually present on the certificate."""
+    value = name.native.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _format_serial(serial_number: int) -> str:
+    """Hex, colon-separated, e.g. ``'51:F1:7D:EE:...'`` -- the conventional
+    X.509 display form (as `openssl x509 -serial` prints it)."""
+    hex_digits = format(serial_number, 'X')
+    if len(hex_digits) % 2:
+        hex_digits = '0' + hex_digits
+    return ':'.join(hex_digits[i : i + 2] for i in range(0, len(hex_digits), 2))
+
+
+def _certificate_details(cert: x509.Certificate) -> CertificateDetails:
+    return CertificateDetails(
+        subject_common_name=_name_component(cert.subject, 'common_name'),
+        subject_organization=_name_component(cert.subject, 'organization_name'),
+        issuer_common_name=_name_component(cert.issuer, 'common_name'),
+        issuer_organization=_name_component(cert.issuer, 'organization_name'),
+        valid_from=cert.not_valid_before,
+        valid_until=cert.not_valid_after,
+        serial_number=_format_serial(cert.serial_number),
+    )
 
 
 _ISSUE_REASONS = frozenset(

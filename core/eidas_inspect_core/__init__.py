@@ -5,6 +5,7 @@ from .errors import (
     PasswordRequiredError,
 )
 from .models import (
+    CertificateDetails,
     IntegrityStatus,
     RevocationSource,
     RevocationStatus,
@@ -13,6 +14,7 @@ from .models import (
     SignatureType,
     TimestampQuality,
     TrustChainStatus,
+    TrustMatch,
     VerdictBreakdown,
     VerdictReason,
     VerificationResult,
@@ -27,6 +29,7 @@ __all__ = [
     'EidasInspectError',
     'IncorrectPasswordError',
     'PasswordRequiredError',
+    'CertificateDetails',
     'IntegrityStatus',
     'RevocationFetchers',
     'RevocationSource',
@@ -38,6 +41,7 @@ __all__ = [
     'TrustChainStatus',
     'TrustListCache',
     'TrustListSnapshot',
+    'TrustMatch',
     'VerdictBreakdown',
     'VerdictReason',
     'VerificationResult',

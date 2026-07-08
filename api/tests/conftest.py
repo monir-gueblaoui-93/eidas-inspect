@@ -29,7 +29,10 @@ from pdf_fixtures import (  # noqa: E402
     generate_self_signed_signer,
     sign_pdf_bytes,
 )
-from trust_list_fixtures import fresh_snapshot, registry_with_granted_ca  # noqa: E402
+from trust_list_fixtures import (  # noqa: E402
+    fresh_snapshot,
+    registry_with_granted_ca_and_territory,
+)
 
 from api.main import create_app  # noqa: E402
 from api.rate_limit import limiter  # noqa: E402
@@ -103,7 +106,13 @@ def qualified_pdf_and_snapshot():
         qc_type_oid=QC_TYPE_ESIGN_OID,
     )
     pdf_bytes = sign_pdf_bytes(build_minimal_pdf(), signer)
-    snapshot = fresh_snapshot(registry_with_granted_ca(_asn1(ca_cert_cx)))
+    registry, service_territories = registry_with_granted_ca_and_territory(
+        _asn1(ca_cert_cx),
+        territory='FR',
+        territory_name='France',
+        tl_location_url='https://example.test/FR-trusted-list.xml',
+    )
+    snapshot = fresh_snapshot(registry, service_territories)
     crl_der = build_crl(ca_key, ca_subject)
 
     async def crl_fetch(url):

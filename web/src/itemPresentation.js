@@ -90,11 +90,59 @@ export function whoDisplay(item) {
     : item.type === 'timestamp'
       ? 'Timestamp authority not identified'
       : 'Signer not identified'
-  const secondary =
-    item.issuing_tsp && item.issuing_tsp !== item.signer_name
-      ? `Certificate issued by ${item.issuing_tsp}`
-      : null
-  return { icon: IconInfoCircle, tone: TONE.NEUTRAL, text: primary, sub: secondary }
+  // Who issued the certificate now has its own prominent row (see
+  // issuerDisplay) rather than being buried here as a secondary line.
+  return { icon: IconInfoCircle, tone: TONE.NEUTRAL, text: primary }
+}
+
+/** The certificate issuer, promoted to its own prominent card element per
+ * user feedback that it was too easy to miss as a "Who" sub-line. */
+export function issuerDisplay(item) {
+  return {
+    text: item.issuing_tsp ? `Issued by ${item.issuing_tsp}` : 'Issuer not identified',
+    // Matches the card's own "Qualified & confirmed" badge condition
+    // (itemBadge/itemTone) so a standalone qualified timestamp gets the
+    // same affirmation a qualified signature/seal does -- its "qualified"
+    // signal lives in timestamp_quality rather than level, so gating on
+    // level alone would silently skip every timestamp item.
+    onTrustedList: item.verdict_reason === 'confirmed_qualified',
+  }
+}
+
+/** Deep link to the EU's official eIDAS Dashboard TL browser page for one
+ * territory -- confirmed live (2026) at
+ * eidas.ec.europa.eu/efda/trust-services/browse/eidas/tls/tl/{code},
+ * e.g. .../tl/FR for France. Only meaningful when a trust_match exists. */
+export function eidasDashboardUrl(territory) {
+  return `https://eidas.ec.europa.eu/efda/trust-services/browse/eidas/tls/tl/${territory}`
+}
+
+function pickPrimarySecondary(primaryValue, secondaryValue) {
+  const primary = primaryValue || secondaryValue || null
+  const secondary = secondaryValue && secondaryValue !== primary ? secondaryValue : null
+  return { primary, secondary }
+}
+
+/** Structured certificate facts for the "Certificate" section -- subject
+ * fields lead with whichever is more meaningful for the item's type (an
+ * organization's name for a seal, a person's name for a signature). */
+export function certificateDisplay(item) {
+  const cert = item.certificate
+  if (!cert) return null
+
+  const isOrgLed = item.type === 'seal'
+  const subject = isOrgLed
+    ? pickPrimarySecondary(cert.subject_organization, cert.subject_common_name)
+    : pickPrimarySecondary(cert.subject_common_name, cert.subject_organization)
+  const issuer = pickPrimarySecondary(cert.issuer_common_name, cert.issuer_organization)
+
+  return {
+    subject: { primary: subject.primary || 'Not available', secondary: subject.secondary },
+    issuer: { primary: issuer.primary || 'Not available', secondary: issuer.secondary },
+    validFrom: formatWhen(cert.valid_from),
+    validUntil: formatWhen(cert.valid_until),
+    serialNumber: cert.serial_number,
+  }
 }
 
 export function integrityDisplay(item) {

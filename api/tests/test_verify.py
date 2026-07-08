@@ -20,6 +20,29 @@ def test_verify_confirmed_qualified_signature_is_trusted(app_factory, qualified_
     assert item['trust_chain_status'] == 'trusted'
     assert item['revocation_status'] == 'good'
     assert item['verdict_reason'] == 'confirmed_qualified'
+    assert item['certificate']['subject_organization'] == 'Test QTSP'
+    assert item['certificate']['issuer_organization'] == 'Test QTSP'
+    assert ':' in item['certificate']['serial_number']
+    assert item['trust_match'] == {
+        'territory': 'FR',
+        'territory_name': 'France',
+        'trust_service_name': 'Test QTSP CA',
+        'tl_location_url': 'https://example.test/FR-trusted-list.xml',
+    }
+
+
+def test_verify_plain_advanced_signature_has_certificate_but_no_trust_match(
+    app_factory, plain_signed_pdf
+):
+    client = app_factory()
+
+    response = client.post(
+        '/api/verify', files={'file': ('doc.pdf', plain_signed_pdf, 'application/pdf')}
+    )
+
+    item = response.json()['items'][0]
+    assert item['certificate'] is not None
+    assert item['trust_match'] is None
 
 
 def test_verify_plain_advanced_signature_is_partial(app_factory, plain_signed_pdf):

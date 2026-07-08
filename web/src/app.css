@@ -519,6 +519,73 @@ input {
   margin-bottom: var(--space-4);
 }
 
+/* ---------- Issuer row ---------- */
+/* Deliberately subtle (a soft neutral well, not a colored banner) -- the
+   "On the EU Trusted List" affirmation must not compete with the main
+   verdict banner for visual weight. */
+.issuer-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  background: var(--color-surface-sunken);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-4);
+  color: var(--color-text-secondary);
+}
+
+.issuer-row svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--color-text-muted);
+}
+
+.issuer-row__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.issuer-row__text {
+  font-weight: 700;
+  font-size: var(--text-sm);
+  color: var(--color-text);
+}
+
+.issuer-row__trust {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.issuer-row__badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  color: var(--verdict-trusted-text);
+  background: var(--verdict-trusted-bg);
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+}
+
+.issuer-row__verify-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  color: var(--verdict-trusted-icon);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.issuer-row__verify-link:hover {
+  color: var(--verdict-trusted-text);
+}
+
 .sig-card__grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -580,6 +647,50 @@ input {
   font-weight: 500;
 }
 
+/* ---------- Certificate section ---------- */
+.cert-section {
+  border-top: 1px solid var(--color-border);
+  padding-top: var(--space-4);
+  margin-bottom: var(--space-1);
+}
+
+.cert-section__title {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  margin-bottom: var(--space-3);
+}
+
+.cert-section__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.cert-section__row {
+  display: flex;
+  gap: var(--space-3);
+  font-size: var(--text-sm);
+}
+
+.cert-section__row dt {
+  flex: 0 0 72px;
+  color: var(--color-text-muted);
+  font-weight: 600;
+}
+
+.cert-section__row dd {
+  margin: 0;
+  color: var(--color-text);
+}
+
+.cert-section__sub {
+  color: var(--color-text-muted);
+}
+
 .sig-card__technical {
   border-top: 1px solid var(--color-border);
   margin-top: var(--space-3);
@@ -614,6 +725,26 @@ input {
   background: var(--color-surface-sunken);
   border-radius: var(--radius-sm);
   padding: var(--space-3);
+}
+
+.sig-card__technical-body p {
+  margin: 0 0 var(--space-2);
+}
+
+.sig-card__technical-body p:last-child {
+  margin-bottom: 0;
+}
+
+.sig-card__technical-line {
+  word-break: break-all;
+}
+
+.sig-card__technical-body code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85em;
+  background: var(--color-surface);
+  padding: 1px 5px;
+  border-radius: 4px;
 }
 
 /* ---------- Result actions ---------- */

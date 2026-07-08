@@ -21,6 +21,27 @@ class IntegrityStatusOut(BaseModel):
     lta_extended: bool
 
 
+class CertificateDetailsOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    subject_common_name: str | None
+    subject_organization: str | None
+    issuer_common_name: str | None
+    issuer_organization: str | None
+    valid_from: datetime
+    valid_until: datetime
+    serial_number: str
+
+
+class TrustMatchOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    territory: str
+    territory_name: str
+    trust_service_name: str
+    tl_location_url: str
+
+
 class SignatureItemOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -37,6 +58,8 @@ class SignatureItemOut(BaseModel):
     revocation_status: str
     revocation_source: str | None
     verdict_reason: str
+    certificate: CertificateDetailsOut | None
+    trust_match: TrustMatchOut | None
 
 
 class VerdictBreakdownOut(BaseModel):

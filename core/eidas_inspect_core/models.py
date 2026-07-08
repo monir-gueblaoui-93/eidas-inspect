@@ -117,6 +117,69 @@ class VerdictBreakdown:
 
 
 @dataclass(frozen=True)
+class CertificateDetails:
+    """Structured facts read directly from the signing certificate's X.509
+    fields, for the UI's "Certificate" section. Plain-language framing
+    (which field to lead with for a signature vs. a seal, date formatting,
+    etc.) is entirely a UI-layer decision -- this is the raw structured
+    data underneath it. ``None`` on :class:`SignatureItem` only when the
+    item couldn't be read/validated at all (no certificate to describe)."""
+
+    subject_common_name: str | None
+    """The certificate subject's CN -- typically a person's name for a
+    signature, or the organization's own name for a seal."""
+
+    subject_organization: str | None
+    """The certificate subject's O -- the organization a signer belongs to,
+    or the sealing organization itself."""
+
+    issuer_common_name: str | None
+    """The issuing CA's CN."""
+
+    issuer_organization: str | None
+    """The issuing CA's O -- the same value as :attr:`SignatureItem.issuing_tsp`,
+    exposed here too so the full certificate picture is available in one
+    structured place."""
+
+    valid_from: datetime
+    valid_until: datetime
+
+    serial_number: str
+    """Hex-formatted, colon-separated (e.g. ``'51:F1:7D:EE:...'``) -- the
+    conventional X.509 display form. Technical-detail-only; never surfaced
+    in the plain-language layer."""
+
+
+@dataclass(frozen=True)
+class TrustMatch:
+    """Which EU/EEA Trusted List entry confirmed a :class:`SignatureItem`'s
+    trust chain. Only present when :attr:`SignatureItem.trust_chain_status`
+    is :attr:`TrustChainStatus.TRUSTED` -- there is nothing to point at
+    otherwise, and linking into a trusted list that didn't actually
+    corroborate the item would be actively misleading. Lets the UI offer a
+    "verify it yourself" link back to the authoritative source instead of
+    asking the user to take the verdict on faith."""
+
+    territory: str
+    """The EU eIDAS scheme's two-letter territory code (e.g. ``'FR'``;
+    note ``'EL'`` for Greece and ``'UK'`` for the United Kingdom, per the
+    scheme's own convention rather than strict ISO 3166-1)."""
+
+    territory_name: str
+    """Human-readable name, e.g. ``'France'``."""
+
+    trust_service_name: str
+    """The matched granted qualified service's name on that territory's
+    trusted list, e.g. ``'Scrive Qualified Electronic Signatures'``."""
+
+    tl_location_url: str
+    """The raw XML URL of that territory's trusted list, straight from the
+    LOTL -- for the technical drawer, not for display as a clickable link
+    itself (the human-friendly eIDAS Dashboard link is built from
+    :attr:`territory` instead)."""
+
+
+@dataclass(frozen=True)
 class IntegrityStatus:
     """Result of ByteRange/CMS integrity checking for one signature."""
 
@@ -155,6 +218,8 @@ class SignatureItem:
     revocation_status: RevocationStatus = RevocationStatus.NOT_CHECKED
     revocation_source: RevocationSource | None = None
     verdict_reason: VerdictReason = VerdictReason.NOT_QUALIFIED
+    certificate: CertificateDetails | None = None
+    trust_match: TrustMatch | None = None
 
 
 @dataclass(frozen=True)

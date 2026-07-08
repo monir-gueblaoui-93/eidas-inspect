@@ -770,11 +770,107 @@ the exact one-time setup steps (new project from GitHub, volume at
 `/data`, generate domain) and the ongoing deploy flow (`git push` =
 redeploy) for the user to click through themselves.
 
-## Next: Day 7 -- polish, then the real Railway deploy
+## Done: verdict card UX improvements (issuer prominence, certificate details, Trusted List link)
 
-1. Click through `DEPLOY.md`'s one-time Railway setup, confirm the
-   production smoke test (real signed PDF, unsigned PDF, report download,
-   all from a phone) against the live `*.up.railway.app` URL.
+Triggered by real user feedback on the deployed card design: the issuing
+TSP was buried as a "Who" sub-line, there was no structured view of the
+certificate itself, and there was no way for a user to independently
+verify a trust match against the EU's own published data. All three
+required new structured facts from core, not just UI rearrangement --
+`SignatureItem` gained two new fields.
+
+- **New core model: `CertificateDetails`** (`subject_common_name`,
+  `subject_organization`, `issuer_common_name`, `issuer_organization`,
+  `valid_from`, `valid_until`, `serial_number`) -- read straight from the
+  signing certificate's X.509 fields in a new `_certificate_details()`
+  helper in `verify.py`. `serial_number` is hex, colon-separated (the
+  `openssl x509 -serial` convention). Populated on every `SignatureItem`
+  that got far enough to have a certificate at all (`None` only for the
+  rare unreadable-item case) -- confirmed on `qes_document.pdf` this
+  correctly surfaces its ~15-minute validity window
+  (`09:47:20Z`–`10:02:20Z`), the exact short-lived-cert story this
+  project is built around.
+- **New core model: `TrustMatch`** (`territory`, `territory_name`,
+  `trust_service_name`, `tl_location_url`) -- only populated when
+  `trust_chain_status` is `TRUSTED`. This required real new tracking in
+  the Trusted List module, not just plumbing: `TSPRegistry` (pyHanko's)
+  is deliberately a flat, territory-agnostic cert/service index with no
+  concept of "which member state's list did this come from" -- correct
+  for path-building, useless for attribution. `build_snapshot()` now
+  parses each territory's TL into its own throwaway registry first,
+  registers those same service objects into the shared registry
+  afterwards (preserving object identity end-to-end, confirmed
+  experimentally before relying on it), and records
+  `id(service_definition) -> ServiceTerritory` in a new side-table on
+  `TrustListSnapshot` (`service_territories`, keyed by object identity
+  since these are the literal objects a later
+  `QualificationResult.service_definition` will point back to -- never
+  copied anywhere in pyHanko's own code, verified by reading
+  `QualificationAssessor.check_entity_cert_qualified`). A new
+  `_TERRITORY_NAMES` table maps the EU eIDAS scheme's territory codes
+  (not quite ISO 3166-1 -- notably `EL` for Greece, `UK` for the United
+  Kingdom) to human names, covering all 32 codes the real LOTL fixture
+  references.
+- **The eIDAS Dashboard TL-browser URL was verified live, not guessed.**
+  The user's suggested `eidas.ec.europa.eu/efda/tl-browser` domain
+  turned out correct (confirmed via a redirect chain from the legacy
+  `webgate.ec.europa.eu/tl-browser`), but the *deep-link* pattern for a
+  specific territory required a web search past the Angular SPA's
+  client-rendered shell (which returns no server-side content to fetch):
+  confirmed via indexed page titles ("Trusted List France - eIDAS
+  Dashboard" etc.) to be
+  `eidas.ec.europa.eu/efda/trust-services/browse/eidas/tls/tl/{territory}`.
+  Live-tested against `qes_document.pdf`'s real match: territory `NO`
+  (Norway), URL `.../tl/NO`.
+- **UI: issuer promoted to its own prominent row** (`IssuerRow` in
+  `SignatureCard.jsx`), replacing the old buried "Certificate issued by"
+  sub-line under "Who". Pairs with a small, deliberately subtle "On the
+  EU Trusted List" badge -- styled as a soft neutral well, not a colored
+  banner, so it doesn't compete with the main verdict banner per the
+  explicit ask. Gated on `verdict_reason === 'confirmed_qualified'`
+  rather than `level === 'qualified'` alone: a standalone qualified
+  timestamp expresses its "qualified" fact through `timestamp_quality`,
+  not `level` (which stays `UNKNOWN` for timestamps), so gating on level
+  would have silently never shown the affirmation for a qualified
+  timestamp item -- caught by tracing the card's own existing badge logic
+  rather than assumed.
+- **UI: new "Certificate" section** (`CertificateSection.jsx`), visible
+  by default (no extra expand/collapse -- reusing the existing technical
+  drawer for the one properly-technical fact instead of adding a second
+  disclosure control): Subject and Issuer each lead with whichever name
+  component means more for the item's type (organization for a seal,
+  person for a signature/timestamp), with the other shown parenthetically
+  only when present and different; Valid from/until in the same
+  human-readable + time-of-day format used elsewhere (necessary, not
+  decorative -- a date-only format would show identical dates for a
+  same-day short-lived cert). Serial number moved into the existing
+  technical-details drawer, alongside the trusted list's raw XML URL when
+  a trust match exists.
+- **UI: "Verify it yourself" link**, shown only alongside the Trusted
+  List affirmation and only when a `trust_match` is actually present
+  (never links into a list that didn't corroborate the match, per the
+  explicit requirement) -- opens in a new tab, marked with an external-link
+  icon plus a visually-hidden "(opens in a new tab)" for screen readers.
+- **Tests**: 4 new core tests (territory tracking against the real LOTL
+  fixture, `trust_match` present/absent, certificate subject-vs-issuer
+  distinction) plus 2 new API tests asserting the JSON envelope. One
+  genuine flake caught and fixed during this work: an early version of
+  the territory-tracking test assumed Malta's TL registers only
+  CA-type services and Iceland's only QTST-type, and grabbed "the first"
+  authority from an unordered Python `set` -- true often enough to pass
+  in isolation, false often enough (Iceland's TL also registers a CA-type
+  service) to fail under full-suite hash-ordering. Fixed by asserting
+  over every registered service rather than trusting iteration order.
+  74/74 across `core/` + `api/`, run three times back to back to confirm
+  the flake was actually gone, not just not-hit that time.
+- **Acceptance**: re-verified `qes_document.pdf` live against the real
+  EU Trusted List -- full JSON shown to the user, `certificate` and
+  `trust_match` populated exactly as designed, before commit.
+
+## Next: Day 7 -- polish
+
+1. Review the new card design on the live Railway URL (auto-deployed on
+   push) -- this environment still has no browser to do that pass itself.
 2. README demo GIF; a small real-world test-document set beyond the two
    documents used so far (BankID-signed, D-Trust-sealed, a genuinely
    broken-seal fixture), per the PRD's own recommended open item.

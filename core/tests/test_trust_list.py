@@ -2,6 +2,7 @@ import asyncio
 import io
 from pathlib import Path
 
+import pytest
 from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
 from pyhanko.sign import PdfSignatureMetadata, PdfTimeStamper, sign_pdf
 from pyhanko.sign.timestamps import DummyTimeStamper
@@ -14,7 +15,7 @@ from eidas_inspect_core import (
     TrustChainStatus,
     verify_pdf,
 )
-from eidas_inspect_core.trust_list import LotlStatus, build_snapshot
+from eidas_inspect_core.trust_list import LotlStatus, TrustListSnapshot, build_snapshot
 from eidas_inspect_core.trust_list.cache import TrustListCache
 from pdf_fixtures import (
     QC_TYPE_ESIGN_OID,
@@ -26,6 +27,7 @@ from trust_list_fixtures import (
     degraded_snapshot,
     fresh_snapshot,
     registry_with_granted_ca,
+    registry_with_granted_ca_and_territory,
     registry_with_granted_qtst,
 )
 
@@ -81,6 +83,46 @@ def test_build_snapshot_parses_real_lotl_and_member_states():
     tsas = list(snapshot.registry.known_timestamp_authorities)
     assert len(cas) > 0  # Malta's CA/QC services
     assert len(tsas) > 0  # Iceland's QTST services
+
+
+def test_build_snapshot_tracks_which_territory_each_service_came_from():
+    lotl_xml = _read('eu-lotl.xml')
+    fetch = _stub_fetch(
+        {'mca.org.mt': _read('MT.xml'), 'fjarskiptastofa.is': _read('IS.xml')}
+    )
+
+    snapshot = asyncio.run(
+        build_snapshot(lotl_xml, fetch, only_territories={'MT', 'IS'})
+    )
+
+    # Every service registered from either territory's TL must resolve back
+    # to that exact territory -- checked over the whole set rather than "the
+    # first" authority found, since a plain Python set has no defined
+    # iteration order and either territory's TL might register both CA and
+    # QTST-type services.
+    authorities = set(snapshot.registry.known_certificate_authorities) | set(
+        snapshot.registry.known_timestamp_authorities
+    )
+    territories_seen = set()
+    for authority in authorities:
+        for service in snapshot.registry.applicable_service_definitions(authority, None):
+            territory = snapshot.territory_for_service(service)
+            assert territory is not None
+            if territory.territory == 'MT':
+                assert territory.territory_name == 'Malta'
+                assert 'mca.org.mt' in territory.tl_location_url
+            elif territory.territory == 'IS':
+                assert territory.territory_name == 'Iceland'
+                assert 'fjarskiptastofa.is' in territory.tl_location_url
+            else:
+                pytest.fail(f'unexpected territory: {territory.territory}')
+            territories_seen.add(territory.territory)
+
+    assert territories_seen == {'MT', 'IS'}
+
+
+def test_territory_for_service_is_none_for_no_match():
+    assert TrustListSnapshot.empty().territory_for_service(None) is None
 
 
 def test_build_snapshot_isolates_one_territory_failure():
@@ -214,6 +256,55 @@ def test_granted_ca_yields_trusted_and_qualified():
     assert 'confirmed on the EU Trusted List' in item.plain_explanation
 
 
+def test_granted_ca_yields_trust_match_with_territory_info():
+    qes_signer = generate_self_signed_signer(
+        common_name='Alice Natural Person',
+        organization='Test QTSP',
+        qc_compliance=True,
+        qc_sscd=True,
+        qc_type_oid=QC_TYPE_ESIGN_OID,
+    )
+    pdf = sign_pdf_bytes(build_minimal_pdf(), qes_signer)
+    registry, service_territories = registry_with_granted_ca_and_territory(
+        qes_signer.signing_cert,
+        service_name='Test QTSP CA',
+        territory='FR',
+        territory_name='France',
+        tl_location_url='https://example.test/FR-trusted-list.xml',
+    )
+    snapshot = fresh_snapshot(registry, service_territories)
+
+    result = verify_pdf(pdf, trust_list=snapshot)
+
+    item = result.items[0]
+    assert item.trust_chain_status == TrustChainStatus.TRUSTED
+    assert item.trust_match is not None
+    assert item.trust_match.territory == 'FR'
+    assert item.trust_match.territory_name == 'France'
+    assert item.trust_match.trust_service_name == 'Test QTSP CA'
+    assert item.trust_match.tl_location_url == 'https://example.test/FR-trusted-list.xml'
+
+
+def test_granted_ca_without_territory_info_has_no_trust_match():
+    # registry_with_granted_ca (no territory tracking) mirrors a snapshot
+    # built by hand rather than by build_snapshot() -- trust_chain_status
+    # still resolves correctly, but there's no trusted list to link to.
+    qes_signer = generate_self_signed_signer(
+        common_name='Alice Natural Person',
+        organization='Test QTSP',
+        qc_compliance=True,
+        qc_sscd=True,
+        qc_type_oid=QC_TYPE_ESIGN_OID,
+    )
+    pdf = sign_pdf_bytes(build_minimal_pdf(), qes_signer)
+    snapshot = fresh_snapshot(registry_with_granted_ca(qes_signer.signing_cert))
+
+    result = verify_pdf(pdf, trust_list=snapshot)
+
+    assert result.items[0].trust_chain_status == TrustChainStatus.TRUSTED
+    assert result.items[0].trust_match is None
+
+
 def test_unregistered_ca_with_fresh_lists_is_confidently_untrusted(
     signer, unsigned_pdf
 ):
@@ -223,6 +314,7 @@ def test_unregistered_ca_with_fresh_lists_is_confidently_untrusted(
     result = verify_pdf(signed, trust_list=empty_but_fresh)
 
     assert result.items[0].trust_chain_status == TrustChainStatus.UNTRUSTED
+    assert result.items[0].trust_match is None
 
 
 def test_unregistered_ca_with_degraded_lists_is_unavailable_not_untrusted(

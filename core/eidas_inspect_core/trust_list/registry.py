@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 
@@ -21,13 +21,19 @@ import aiohttp
 from pyhanko.sign.validation.qualified import eutl_parse
 from pyhanko.sign.validation.qualified.eutl_fetch import EU_LOTL_LOCATION
 from pyhanko.sign.validation.qualified.eutl_parse import LOTL_RULE
-from pyhanko.sign.validation.qualified.tsp import TSPRegistry
+from pyhanko.sign.validation.qualified.tsp import (
+    CAServiceInformation,
+    QTSTServiceInformation,
+    QualifiedServiceInformation,
+    TSPRegistry,
+)
 
 __all__ = [
     'EU_LOTL_LOCATION',
     'STALE_AFTER',
     'Fetcher',
     'LotlStatus',
+    'ServiceTerritory',
     'TerritoryStatus',
     'TrustListSnapshot',
     'build_snapshot',
@@ -42,6 +48,50 @@ counts as stale. One missed refresh cycle should not immediately make every
 signature report "could not be confirmed"."""
 
 Fetcher = Callable[[str], Awaitable[str]]
+
+_TERRITORY_NAMES: dict[str, str] = {
+    'AT': 'Austria',
+    'BE': 'Belgium',
+    'BG': 'Bulgaria',
+    'CY': 'Cyprus',
+    'CZ': 'Czechia',
+    'DE': 'Germany',
+    'DK': 'Denmark',
+    'EE': 'Estonia',
+    'EL': 'Greece',
+    'ES': 'Spain',
+    'FI': 'Finland',
+    'FR': 'France',
+    'HR': 'Croatia',
+    'HU': 'Hungary',
+    'IE': 'Ireland',
+    'IS': 'Iceland',
+    'IT': 'Italy',
+    'LI': 'Liechtenstein',
+    'LT': 'Lithuania',
+    'LU': 'Luxembourg',
+    'LV': 'Latvia',
+    'MT': 'Malta',
+    'NL': 'Netherlands',
+    'NO': 'Norway',
+    'PL': 'Poland',
+    'PT': 'Portugal',
+    'RO': 'Romania',
+    'SE': 'Sweden',
+    'SI': 'Slovenia',
+    'SK': 'Slovakia',
+    'UK': 'United Kingdom',
+}
+"""Territory codes as used by the EU's eIDAS scheme (per the LOTL itself),
+which isn't quite ISO 3166-1: notably 'EL' for Greece and 'UK' for the
+United Kingdom rather than 'GR'/'GB'. Covers every territory referenced by
+the real LOTL as of this writing; an unrecognized code falls back to
+displaying the raw code itself (see :func:`_territory_name`) rather than
+failing, since the EU adds/changes participating territories over time."""
+
+
+def _territory_name(code: str) -> str:
+    return _TERRITORY_NAMES.get(code, code)
 
 
 class LotlStatus(StrEnum):
@@ -63,6 +113,32 @@ class TerritoryStatus:
 
 
 @dataclass(frozen=True)
+class ServiceTerritory:
+    """Which trusted list a granted qualified service came from.
+
+    Tracked separately from :class:`TSPRegistry`, which is deliberately a
+    single flat, territory-agnostic cert/service index (that's what
+    pyHanko's path-building and qualification-assessment logic wants: one
+    registry to check a path against, not thirty disconnected ones). This
+    side-table is what lets a confirmed trust match be traced back to the
+    specific member-state trusted list that vindicated it -- see
+    :meth:`TrustListSnapshot.territory_for_service`.
+    """
+
+    territory: str
+    """The EU eIDAS scheme's territory code, e.g. 'FR' -- see
+    :data:`_TERRITORY_NAMES`."""
+
+    territory_name: str
+    """Human-readable name, e.g. 'France'."""
+
+    tl_location_url: str
+    """The raw XML URL of this territory's trusted list, straight from the
+    LOTL's own ``TLReference`` -- for a technical/"verify it yourself"
+    link, not for display as-is."""
+
+
+@dataclass(frozen=True)
 class TrustListSnapshot:
     """An immutable, point-in-time view of the EU Trusted List data.
 
@@ -78,6 +154,17 @@ class TrustListSnapshot:
     lotl_error: str | None
     territory_status: Mapping[str, TerritoryStatus]
     refreshed_at: datetime | None
+    service_territories: Mapping[int, ServiceTerritory] = field(default_factory=dict)
+    """``id(service_definition) -> ServiceTerritory``, for every service
+    registered into ``registry`` during :func:`build_snapshot`. Keyed by
+    object identity rather than value: these are the exact same service
+    objects handed to ``registry.register_ca``/``register_tst``, so a
+    :class:`~pyhanko.sign.validation.qualified.assess.QualificationResult`'s
+    ``service_definition`` (itself pulled straight from the registry, never
+    copied) can be looked up here directly. Defaults to empty so every
+    existing hand-built snapshot (tests, :meth:`empty`) stays valid without
+    populating this -- "no territory info available" is exactly what an
+    empty mapping means."""
 
     @classmethod
     def empty(cls) -> 'TrustListSnapshot':
@@ -88,6 +175,17 @@ class TrustListSnapshot:
             territory_status={},
             refreshed_at=None,
         )
+
+    def territory_for_service(
+        self, service_definition: QualifiedServiceInformation | None
+    ) -> ServiceTerritory | None:
+        """Which trusted list vindicated ``service_definition``, if known.
+        ``None`` for a ``None`` input (no match at all) or if the service
+        somehow isn't in the table (shouldn't happen for anything that came
+        out of this snapshot's own ``registry``)."""
+        if service_definition is None:
+            return None
+        return self.service_territories.get(id(service_definition))
 
     def is_degraded(
         self, moment: datetime, stale_after: timedelta = STALE_AFTER
@@ -147,6 +245,7 @@ async def build_snapshot(
         )
 
     registry = TSPRegistry()
+    service_territories: dict[int, ServiceTerritory] = {}
     territory_status: dict[str, TerritoryStatus] = {}
     for ref in lotl_result.references:
         if LOTL_RULE in ref.scheme_rules:
@@ -155,9 +254,37 @@ async def build_snapshot(
             continue
         try:
             tl_xml = await fetch(ref.location_uri)
-            _, entry_errors = eutl_parse.trust_list_to_registry(
-                tl_xml, ref.tlso_certs, registry
+            # Parsed into its own throwaway registry, rather than the
+            # shared one directly, purely so the resulting set of service
+            # objects can be attributed to this territory below -- a plain
+            # TSPRegistry has no territory concept of its own (see
+            # ServiceTerritory's docstring). The same service objects are
+            # then registered into the shared `registry` afterwards, so
+            # trust-chain validation still sees exactly one combined
+            # registry, unchanged from before this tracking existed.
+            territory_registry, entry_errors = eutl_parse.trust_list_to_registry(
+                tl_xml, ref.tlso_certs, None
             )
+            territory_info = ServiceTerritory(
+                territory=ref.territory,
+                territory_name=_territory_name(ref.territory),
+                tl_location_url=ref.location_uri,
+            )
+            authorities = set(territory_registry.known_certificate_authorities) | set(
+                territory_registry.known_timestamp_authorities
+            )
+            services: set = set()
+            for authority in authorities:
+                services.update(
+                    territory_registry.applicable_service_definitions(authority, None)
+                )
+            for service in services:
+                if isinstance(service, CAServiceInformation):
+                    registry.register_ca(service)
+                elif isinstance(service, QTSTServiceInformation):
+                    registry.register_tst(service)
+                service_territories[id(service)] = territory_info
+
             if entry_errors:
                 logger.info(
                     "Trusted list for %s parsed with %d non-fatal entry "
@@ -188,4 +315,5 @@ async def build_snapshot(
         lotl_error=None,
         territory_status=territory_status,
         refreshed_at=now,
+        service_territories=service_territories,
     )
