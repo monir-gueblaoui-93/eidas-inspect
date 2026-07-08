@@ -1,6 +1,11 @@
 # Progress
 
-Status as of 2026-07-08, end of Day 2 (per BUILD_GUIDE.md).
+Status as of 2026-07-08, end of Day 2 (per BUILD_GUIDE.md). **The
+`eidas_inspect_core` validation core is functionally complete**: signature
+discovery, integrity/tampering detection, qcStatements classification, EU
+Trusted List matching, OCSP/CRL revocation checking, and the overall
+document verdict all work end-to-end against a real signed PDF. Day 3 is
+the FastAPI layer wrapping this core — see "Next" below.
 
 ## Done (Day 1)
 
@@ -228,6 +233,93 @@ Status as of 2026-07-08, end of Day 2 (per BUILD_GUIDE.md).
   revisiting alongside the overall verdict logic (`_overall_verdict()`),
   which is the next remaining piece anyway.
 
+## Done (Day 2): Overall verdict logic
+
+- **`_overall_verdict()` is real now**, replacing the Day-1 placeholder
+  ("partial whenever any signature is intact"). Every item first gets a
+  `VerdictReason` (`CONFIRMED_QUALIFIED` / `BROKEN` / `TAMPERED` / `REVOKED`
+  / `NOT_TRUSTED` / `UNCONFIRMED` / `NOT_QUALIFIED`), classified by
+  `_classify_verdict_reason()` in strict priority order: a real problem
+  (broken → tampered → revoked → confirmed not-trusted) always outranks an
+  honest gap (unconfirmed), which always outranks "simply not qualified".
+  The document verdict then reduces to two checks over the per-item
+  reasons: all `CONFIRMED_QUALIFIED` → `TRUSTED`; all in the "issue" set
+  (`BROKEN`/`TAMPERED`/`REVOKED`/`NOT_TRUSTED`) → `NOT_TRUSTED`; anything
+  else → `PARTIAL`. `NO_SIGNATURES` is unchanged (early return, never
+  reaches this logic).
+- **`SignatureItem.verdict_reason`** is a first-class per-item field (not a
+  side table), so a UI can render per-item badges/icons and the banner
+  explanation without re-deriving any classification rules —
+  `VerificationResult.verdict_breakdown` (a `VerdictBreakdown` with
+  `total`/`confirmed_qualified`/`issues`/`unconfirmed`/`not_qualified`
+  counts) gives the aggregate for the banner itself. Together these satisfy
+  "list which items drove the verdict and why" without the UI needing to
+  loop and re-count `SignatureItem` facts itself.
+- **`VerificationResult.plain_summary`**: the document-level banner string,
+  matching the PRD's own phrasing exactly where given ("Fully trusted — all
+  N signatures are qualified and intact", "Do not rely on this document").
+  For `PARTIAL`, wording is chosen by priority, matching the PRD's own
+  mixed-document example (1 qualified+valid, 1 advanced+valid, 1 broken →
+  "1 of 3 signatures has issues", silently not counting the advanced one as
+  an "issue"): issues present → "N of M {noun} has/have issues"; else if
+  anything's unconfirmed → "qualified status could not be confirmed right
+  now for N of M {noun}" (deliberately different wording from "issues", per
+  the PRD); else (only not-qualified-but-clean items, e.g. an ordinary
+  advanced signature) → "N of M {noun} is/are qualified; the rest are valid
+  but not qualified" — a third, distinct message this project added beyond
+  the two the PRD names, since neither "issues" nor "unconfirmed" honestly
+  describes "we know for a fact this isn't qualified, and that's fine."
+  `{noun}` is singular/plural-correct and picks the right word
+  (signature/seal/timestamp/item) based on the actual item types present.
+- **Standalone timestamp items are excluded from the verdict count whenever
+  at least one content-bearing signature/seal is present.** This is a
+  deliberate design decision, not in the original ask: a PAdES-LTA
+  timestamp appended to protect a document's long-term validity is
+  infrastructure, not a separate trust decision the user needs to approve.
+  Without this exclusion, attaching that protective timestamp to an
+  otherwise fully-confirmed qualified signature would demote a `TRUSTED`
+  verdict to `PARTIAL` purely because the timestamp itself isn't
+  independently confirmed qualified — actively punishing good practice.
+  Tested explicitly
+  (`test_appended_unconfirmed_lta_timestamp_does_not_demote_a_trusted_signature`).
+  If a document consists *only* of timestamps (no signature/seal at all),
+  they're all there is to judge, so they're used directly instead.
+- **Real-document regression caught by the Demo-document re-check, not by
+  synthetic tests**: the "not qualified" fallback wording had a
+  singular/plural grammar bug ("0 of 1 signature are qualified") that none
+  of the seven hand-built verdict tests exercised, because none of them
+  happened to produce a single not-qualified-only item. Fixed, and a
+  dedicated regression test
+  (`test_advanced_only_signature_is_partial_with_not_qualified_wording`)
+  now locks in the exact real-document case (a plain advanced signature,
+  nothing wrong, nothing uncertain → "Partially trusted — the signature is
+  valid but not qualified."). Worth remembering: re-running against a real
+  file surfaces gaps that synthetic combinatorial tests can miss simply by
+  not happening to construct that exact shape.
+- **First complete end-to-end verdict on a real document**: `Demo
+  document.pdf`, verified with a live Trusted List snapshot and
+  `check_revocation=True`, now returns `verdict=PARTIAL`,
+  `plain_summary="Partially trusted — the signature is valid but not
+  qualified."` — correct and honest: the signature is genuinely intact and
+  unrevoked, just not qualified (no qcStatements extension at all, per the
+  open item below) and its issuer doesn't resolve against Trusted List data
+  right now anyway.
+- **Removed `VerificationResult.trusted_list_status`** (a Day-1 field that
+  was never read or written anywhere — dead weight, not part of this ask,
+  but a natural cleanup while touching this exact class). Superseded by the
+  real per-item `trust_chain_status` plus the new `verdict_breakdown`.
+- **Tests (`core/tests/test_verdict.py`)**: 8 tests, all through the public
+  `verify_pdf()` API (no private-function unit tests) —
+  confirmed-qualified+good → `TRUSTED`; two co-signed signatures (one
+  flagged by the same Day-1 `FORM_FILLING` conservatism used elsewhere,
+  giving a real "one clean + one with an issue" document without hand-built
+  fixtures) → `PARTIAL` with exact counts; advanced-only → `PARTIAL` with
+  "not qualified" wording; qualified-but-degraded-TL → `PARTIAL` with
+  "unconfirmed" wording; all-tampered → `NOT_TRUSTED`; revoked-only-item →
+  `NOT_TRUSTED`; unsigned → `NO_SIGNATURES`; appended unconfirmed LTA
+  timestamp on top of a confirmed signature → still `TRUSTED`. 44/44 tests
+  passing across the whole core.
+
 ## Key implementation decisions
 
 - **Conservative QUALIFIED policy**: `SignatureItem.level` is only
@@ -239,10 +331,10 @@ Status as of 2026-07-08, end of Day 2 (per BUILD_GUIDE.md).
   over-claim, per CLAUDE.md.
 - **Level is decoupled from Trust chain on purpose**: `level` reflects only
   what the certificate *claims* (Day 1's qcStatements-only classifier,
-  untouched by Day 2); `trust_chain_status` now reflects the real EU Trusted
-  List check. The final "confirmed qualified" verdict logic combining both
-  fields is still Day 2+ work (`_overall_verdict()` in `verify.py` remains
-  the Day-1 placeholder — see Next).
+  untouched since); `trust_chain_status` reflects the real EU Trusted List
+  check. The two are only combined at the very end, in
+  `_classify_verdict_reason()`/`_overall_verdict()` — every earlier stage
+  keeps them as separate, honest facts rather than collapsing them early.
 - **Level is also decoupled from integrity, except when integrity is
   broken**: type (signature vs seal) is derived from QcType regardless of
   whether the signature validates, since a seal claim doesn't stop being a
@@ -288,21 +380,37 @@ Status as of 2026-07-08, end of Day 2 (per BUILD_GUIDE.md).
 - **Revocation is checked as of verification time, not signing time** — see
   the "known simplification" note above. Not incorrect for a currently-valid
   cert, but not full point-in-time AdES semantics for old signatures either.
-- Re-verified `Demo document.pdf` with `check_revocation=True` against the
-  live EU LOTL: `revocation_status` correctly comes back `NOT_CHECKED`,
-  because `trust_chain_status` is `UNAVAILABLE` for this document (its
-  issuer, GlobalSign, doesn't resolve against the Trusted List data we have)
-  — no PKIX path is built, so there's nothing for revocation checking to
-  walk. Still haven't seen a real document exercise the `TRUSTED` +
-  `GOOD`/`REVOKED` paths end-to-end; only the `Demo document.pdf` open item
-  above would give us that.
+- **Still haven't seen a real document exercise the full `TRUSTED` path, or
+  the `GOOD`/`REVOKED` revocation states, end-to-end.** `Demo document.pdf`
+  (verified live with `check_revocation=True` against the real EU LOTL)
+  correctly lands on `PARTIAL` — "the signature is valid but not qualified"
+  — because it has no qcStatements extension at all (see the QES open item
+  above) and its issuer doesn't resolve against Trusted List data anyway,
+  so `revocation_status` stays `NOT_CHECKED` (no path, nothing to walk).
+  Every state has been proven correct against real cryptographic fixtures
+  in tests; a genuinely QES-signed real document is what's needed to see
+  `TRUSTED` fire outside of tests.
 
-## Next: Day 2, remainder per BUILD_GUIDE.md
+## Next: Day 3 per BUILD_GUIDE.md — the API layer
 
-1. **Overall verdict logic**: combine `level` + `trust_chain_status` +
-   `revocation_status` into the final trusted / partial / not-trusted /
-   no-signatures verdict per PRD section 6, with uncertainty (degraded TL,
-   unavailable revocation) lowering confidence honestly rather than
-   guessing. `_overall_verdict()` in `verify.py` is currently a placeholder
-   (partial whenever any signature is intact) and should be replaced by
-   this real logic.
+The validation core (`eidas_inspect_core`) is done: `verify_pdf()` returns
+a complete, honest `VerificationResult` — signature discovery, integrity,
+qcStatements classification, EU Trusted List matching, OCSP/CRL revocation,
+and the overall verdict all wired together. Day 3 wraps this in `api/`
+(FastAPI), per BUILD_GUIDE.md's Prompt 7:
+
+1. `POST /api/verify` (multipart PDF + optional password, 50 MB cap,
+   returns `VerificationResult` as JSON) and `POST /api/report` (PDF report
+   generation, reportlab/weasyprint).
+2. Own the `TrustListCache` lifecycle: refresh once at startup (or decide
+   to serve degraded until the first refresh completes — an explicit open
+   question from the Trusted List work), then a 24h refresh loop (FastAPI
+   lifespan background task). Core deliberately exposes `refresh()` as a
+   bare coroutine for exactly this.
+3. Decide the default `check_revocation` behavior for the live API (the
+   core defaults it to `False`) and whether/how a request can opt in or out
+   given the added latency of live OCSP/CRL fetches.
+4. IP-based rate limiting (10/hour, slowapi), anonymous SQLite counters
+   (date, count, verdict distribution — nothing else), ephemerality
+   enforcement (file bytes in request scope only, filenames/content never
+   logged), health endpoint, serving the built frontend as static files.

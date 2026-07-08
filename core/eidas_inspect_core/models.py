@@ -50,6 +50,55 @@ class RevocationStatus(StrEnum):
     NOT_CHECKED = 'not_checked'
 
 
+class VerdictReason(StrEnum):
+    """Why one :class:`SignatureItem` counted the way it did towards the
+    document-level :class:`VerificationVerdict`. Exposed on every item so a
+    UI can render a banner explanation (and per-item badges) without
+    re-deriving the classification rules in ``_overall_verdict``."""
+
+    CONFIRMED_QUALIFIED = 'confirmed_qualified'
+    """Intact, valid, not tampered, not revoked, qualified, and the issuer
+    is confirmed on the EU Trusted List. The "fully green" case."""
+
+    BROKEN = 'broken'
+    """Cryptographic integrity failed (bad digest or signature)."""
+
+    TAMPERED = 'tampered'
+    """The document was changed after this item was applied, beyond what
+    PAdES-LTA permits."""
+
+    REVOKED = 'revoked'
+    """The certificate has been revoked."""
+
+    NOT_TRUSTED = 'not_trusted'
+    """Otherwise clean, but the issuer was confirmed *not* to be a granted
+    qualified service on the EU Trusted List -- a real, known fact, not an
+    uncertainty."""
+
+    UNCONFIRMED = 'unconfirmed'
+    """Otherwise clean and claims to be qualified, but that claim could not
+    be confirmed right now (Trusted List or revocation data unavailable, or
+    revocation was never checked). An honest gap, not a known problem."""
+
+    NOT_QUALIFIED = 'not_qualified'
+    """Otherwise clean, but does not claim qualified status at all (an
+    ordinary advanced signature/seal, or an unconfirmed timestamp). Not a
+    problem and not an uncertainty -- simply not qualified."""
+
+
+@dataclass(frozen=True)
+class VerdictBreakdown:
+    """Aggregate counts behind the document-level verdict, so a UI can
+    render banner detail without re-counting :attr:`SignatureItem.verdict_reason`
+    itself."""
+
+    total: int
+    confirmed_qualified: int
+    issues: int
+    unconfirmed: int
+    not_qualified: int
+
+
 @dataclass(frozen=True)
 class IntegrityStatus:
     """Result of ByteRange/CMS integrity checking for one signature."""
@@ -87,6 +136,7 @@ class SignatureItem:
     level: SignatureLevel = SignatureLevel.UNKNOWN
     trust_chain_status: TrustChainStatus = TrustChainStatus.UNKNOWN
     revocation_status: RevocationStatus = RevocationStatus.NOT_CHECKED
+    verdict_reason: VerdictReason = VerdictReason.NOT_QUALIFIED
 
 
 @dataclass(frozen=True)
@@ -95,4 +145,10 @@ class VerificationResult:
     items: list[SignatureItem] = field(default_factory=list)
     document_sha256: str = ''
     verified_at: datetime | None = None
-    trusted_list_status: str = 'not_checked'
+    plain_summary: str = ''
+    """Document-level banner text for the verdict, e.g. "Fully trusted --
+    all 2 signatures are qualified and intact." No legalese."""
+    verdict_breakdown: VerdictBreakdown | None = None
+    """Aggregate counts behind :attr:`verdict`. ``None`` only for
+    :attr:`VerificationVerdict.NO_SIGNATURES`, where there is nothing to
+    count."""

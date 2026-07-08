@@ -29,6 +29,8 @@ from .models import (
     SignatureType,
     TimestampQuality,
     TrustChainStatus,
+    VerdictBreakdown,
+    VerdictReason,
     VerificationResult,
     VerificationVerdict,
 )
@@ -56,6 +58,8 @@ def verify_pdf(
             items=[],
             document_sha256=document_sha256,
             verified_at=verified_at,
+            plain_summary='This document contains no digital signatures.',
+            verdict_breakdown=None,
         )
 
     validation_context, crl_fetcher, ocsp_fetcher = _build_validation_context(
@@ -67,11 +71,14 @@ def verify_pdf(
         )
         for sig in embedded_sigs
     ]
+    verdict, plain_summary, breakdown = _overall_verdict(items)
     return VerificationResult(
-        verdict=_overall_verdict(items),
+        verdict=verdict,
         items=items,
         document_sha256=document_sha256,
         verified_at=verified_at,
+        plain_summary=plain_summary,
+        verdict_breakdown=breakdown,
     )
 
 
@@ -213,6 +220,10 @@ def _build_signature_item(
         ocsp_fetcher,
     )
 
+    verdict_reason = _classify_verdict_reason(
+        sig_type, level, integrity, trust_chain_status, revocation_status, timestamp_quality
+    )
+
     plain, technical = _explanations(
         sig_type,
         integrity,
@@ -238,7 +249,49 @@ def _build_signature_item(
         timestamp_quality=timestamp_quality,
         trust_chain_status=trust_chain_status,
         revocation_status=revocation_status,
+        verdict_reason=verdict_reason,
     )
+
+
+def _classify_verdict_reason(
+    sig_type: SignatureType,
+    level: SignatureLevel,
+    integrity: IntegrityStatus,
+    trust_chain_status: TrustChainStatus,
+    revocation_status: RevocationStatus,
+    timestamp_quality: TimestampQuality,
+) -> VerdictReason:
+    """Classify why this item counts the way it does towards the
+    document-level verdict.
+
+    Priority order (most severe first): a real problem (broken, tampered,
+    revoked, confirmed not-trusted) always outranks an honest gap
+    (unconfirmed), which always outranks "simply not qualified" -- matching
+    how a single broken signature dominates the document summary even
+    alongside an unrelated, perfectly valid advanced one.
+    """
+    if not integrity.intact or not integrity.signature_valid:
+        return VerdictReason.BROKEN
+    if integrity.modified_after_signing:
+        return VerdictReason.TAMPERED
+    if revocation_status is RevocationStatus.REVOKED:
+        return VerdictReason.REVOKED
+    if trust_chain_status is TrustChainStatus.UNTRUSTED:
+        return VerdictReason.NOT_TRUSTED
+
+    claims_qualified = (
+        timestamp_quality is TimestampQuality.QUALIFIED_TSA
+        if sig_type is SignatureType.TIMESTAMP
+        else level is SignatureLevel.QUALIFIED
+    )
+    if not claims_qualified:
+        return VerdictReason.NOT_QUALIFIED
+
+    confirmed = (
+        trust_chain_status is TrustChainStatus.TRUSTED
+        and revocation_status is RevocationStatus.GOOD
+    )
+    return VerdictReason.CONFIRMED_QUALIFIED if confirmed else VerdictReason.UNCONFIRMED
 
 
 def _assess_revocation(
@@ -432,6 +485,7 @@ def _unreadable_signature_item(sig_type: SignatureType, error: Exception) -> Sig
         integrity=integrity,
         plain_explanation=f"This {_noun_for(sig_type)} could not be read or validated.",
         technical_detail=f'{type(error).__name__}: {error}',
+        verdict_reason=VerdictReason.BROKEN,
     )
 
 
@@ -590,9 +644,100 @@ def _friendly_name(name: x509.Name, preferred_key: str) -> str | None:
     return human_friendly or None
 
 
-def _overall_verdict(items: list[SignatureItem]) -> VerificationVerdict:
-    if all(not i.integrity.intact or not i.integrity.signature_valid for i in items):
-        return VerificationVerdict.NOT_TRUSTED
-    # At least one signature is intact and cryptographically valid, but level
-    # and trust-chain status are not yet determined, so this cannot be "trusted".
-    return VerificationVerdict.PARTIAL
+_ISSUE_REASONS = frozenset(
+    {VerdictReason.BROKEN, VerdictReason.TAMPERED, VerdictReason.REVOKED, VerdictReason.NOT_TRUSTED}
+)
+
+
+def _overall_verdict(
+    items: list[SignatureItem],
+) -> tuple[VerificationVerdict, str, VerdictBreakdown]:
+    """Combine every item's :attr:`SignatureItem.verdict_reason` into the
+    document-level verdict, per PRD section 6.
+
+    Standalone timestamp items (typically PAdES-LTA archival additions) are
+    excluded from the count whenever at least one content-bearing
+    signature/seal is present: attaching a protective long-term-validation
+    timestamp to an otherwise fully-confirmed qualified signature must not
+    itself demote the verdict just because the timestamp isn't
+    independently confirmed. If a document consists *only* of timestamps,
+    they're all there is to judge, so they're used directly.
+    """
+    content_items = [i for i in items if i.type is not SignatureType.TIMESTAMP]
+    counted_items = content_items or items
+
+    reasons = [i.verdict_reason for i in counted_items]
+    total = len(counted_items)
+    confirmed = reasons.count(VerdictReason.CONFIRMED_QUALIFIED)
+    issues = sum(1 for r in reasons if r in _ISSUE_REASONS)
+    unconfirmed = reasons.count(VerdictReason.UNCONFIRMED)
+    not_qualified = reasons.count(VerdictReason.NOT_QUALIFIED)
+
+    if confirmed == total:
+        verdict = VerificationVerdict.TRUSTED
+    elif issues == total:
+        verdict = VerificationVerdict.NOT_TRUSTED
+    else:
+        verdict = VerificationVerdict.PARTIAL
+
+    breakdown = VerdictBreakdown(
+        total=total,
+        confirmed_qualified=confirmed,
+        issues=issues,
+        unconfirmed=unconfirmed,
+        not_qualified=not_qualified,
+    )
+    return verdict, _plain_summary(verdict, counted_items, breakdown), breakdown
+
+
+def _items_noun(items: list[SignatureItem]) -> str:
+    types = frozenset(i.type for i in items)
+    singular = {
+        frozenset({SignatureType.SIGNATURE}): 'signature',
+        frozenset({SignatureType.SEAL}): 'seal',
+        frozenset({SignatureType.TIMESTAMP}): 'timestamp',
+    }.get(types, 'item')
+    return singular if len(items) == 1 else f'{singular}s'
+
+
+def _plain_summary(
+    verdict: VerificationVerdict,
+    items: list[SignatureItem],
+    breakdown: VerdictBreakdown,
+) -> str:
+    """Document-level banner text. Distinguishes real "issues" (tampering,
+    revocation, confirmed not-trusted) from an honest "unconfirmed" gap
+    (degraded Trusted List / unavailable revocation) -- these are different
+    messages, not variations on the same one, per the PRD."""
+    noun = _items_noun(items)
+    total = breakdown.total
+
+    if verdict is VerificationVerdict.TRUSTED:
+        if total == 1:
+            return f"Fully trusted — the {noun} is qualified and intact."
+        return f"Fully trusted — all {total} {noun} are qualified and intact."
+
+    if verdict is VerificationVerdict.NOT_TRUSTED:
+        return "Do not rely on this document."
+
+    if breakdown.issues:
+        return (
+            f"Partially trusted — {breakdown.issues} of {total} {noun} "
+            f"{'has' if breakdown.issues == 1 else 'have'} issues."
+        )
+    if breakdown.unconfirmed:
+        return (
+            "Partially trusted — qualified status could not be confirmed "
+            f"right now for {breakdown.unconfirmed} of {total} {noun}."
+        )
+    # No issues, nothing unconfirmed -- everything here is simply valid but
+    # not qualified (e.g. an ordinary advanced signature). A known fact, not
+    # a problem or an uncertainty.
+    if total == 1:
+        return f"Partially trusted — the {noun} is valid but not qualified."
+    qualified_count = breakdown.confirmed_qualified
+    return (
+        f"Partially trusted — {qualified_count} of {total} {noun} "
+        f"{'is' if qualified_count == 1 else 'are'} qualified; the rest are "
+        "valid but not qualified."
+    )
