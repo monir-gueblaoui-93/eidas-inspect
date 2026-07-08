@@ -1,11 +1,11 @@
 # Progress
 
-Status as of 2026-07-08, end of Day 2 (per BUILD_GUIDE.md). **The
-`eidas_inspect_core` validation core is functionally complete**: signature
-discovery, integrity/tampering detection, qcStatements classification, EU
-Trusted List matching, OCSP/CRL revocation checking, and the overall
-document verdict all work end-to-end against a real signed PDF. Day 3 is
-the FastAPI layer wrapping this core — see "Next" below.
+Status as of 2026-07-08, end of Day 3 (per BUILD_GUIDE.md). The
+`eidas_inspect_core` validation core (Days 1–2) is functionally complete,
+and the FastAPI `api/` layer (Day 3) now wraps it end-to-end: a real curl
+against a running server, uploading a real signed PDF, returns the full
+JSON verdict, and `/api/report` turns that JSON into a real single-page PDF
+report. Day 4+ is the React frontend — see "Next" below.
 
 ## Done (Day 1)
 
@@ -391,26 +391,147 @@ the FastAPI layer wrapping this core — see "Next" below.
   in tests; a genuinely QES-signed real document is what's needed to see
   `TRUSTED` fire outside of tests.
 
-## Next: Day 3 per BUILD_GUIDE.md — the API layer
+## Done (Day 3): the FastAPI `api/` layer
 
-The validation core (`eidas_inspect_core`) is done: `verify_pdf()` returns
-a complete, honest `VerificationResult` — signature discovery, integrity,
-qcStatements classification, EU Trusted List matching, OCSP/CRL revocation,
-and the overall verdict all wired together. Day 3 wraps this in `api/`
-(FastAPI), per BUILD_GUIDE.md's Prompt 7:
+- **`api/` is a plain top-level package, not pip-installed.** `core/` is a
+  real distributable library (own `pyproject.toml`, installed editable);
+  `api/` is just the app -- `uvicorn api.main:app` run from the repo root,
+  third-party deps in `api/requirements.txt`. `create_app(...)` is the
+  factory (module-level `app = create_app()` is what uvicorn runs); tests
+  call it with injected, offline dependencies instead.
+- **Startup/refresh, per the decision to never block startup**:
+  `create_app()`'s FastAPI `lifespan` stores a `TrustListCache` on
+  `app.state` and immediately spawns a background `asyncio` task looping
+  `await cache.refresh(); await asyncio.sleep(24h)`. A request arriving
+  before the first refresh completes reads `TrustListCache.snapshot`, which
+  is already `TrustListSnapshot.empty()` (degraded/`UNAVAILABLE`) by
+  design from the Trusted List work -- no special-casing needed here, core
+  was already built for exactly this. Confirmed live: curling
+  `/api/verify` immediately after starting the server hit the API while
+  the background refresh was still mid-flight (visible in the server log)
+  and still returned a clean, honest 200 response.
+- **`check_revocation=True` always, no opt-out param exposed** (per
+  explicit decision) -- `Settings.check_revocation` is a fixed `True`, not
+  a per-request toggle, keeping the v1 API surface minimal.
+- **`verify_pdf()` must never be awaited directly.** It's a synchronous
+  function that calls `asyncio.run()` internally (once per signature item)
+  -- calling it from a coroutine already running inside an event loop would
+  raise `RuntimeError: asyncio.run() cannot be called from a running event
+  loop`. The verify route calls it via
+  `starlette.concurrency.run_in_threadpool`, which runs it in a plain
+  worker thread with no event loop of its own, exactly where nested
+  `asyncio.run()` is safe.
+- **Ephemerality required raising Starlette's multipart spool
+  threshold.** Starlette's multipart parser writes each uploaded file into
+  a `SpooledTemporaryFile` that spills to a **real temp file on disk** once
+  it exceeds 1 MB by default -- directly at odds with "processed in memory
+  only, never written to disk" for any PDF over 1 MB (i.e. almost all of
+  them). `MultiPartParser.spool_max_size` isn't exposed as a constructor
+  or `Request.form()` parameter in the installed Starlette version, so
+  `api/main.py` sets the class attribute directly
+  (`MultiPartParser.spool_max_size = settings.max_upload_bytes`) at import
+  time, so any upload within our own 50 MB cap can never spill. Layered
+  with `MaxBodySizeMiddleware`, which rejects (413) any request whose
+  declared `Content-Length` exceeds the cap *before* multipart parsing
+  starts at all. Known gap, stated rather than silently shipped: a request
+  using chunked transfer encoding without `Content-Length` bypasses the
+  middleware and would only be caught by the route's own post-read size
+  check, by which point the (raised) spool threshold has already kept it
+  in memory up to that point -- acceptable for this project's threat model,
+  not bulletproof against a determined adversary.
+- **JSON response shape built directly from the core dataclasses** via
+  Pydantic v2's `from_attributes=True` (`schemas.to_response()`) rather
+  than a hand-maintained parallel field list -- the API's JSON shape can't
+  silently drift out of sync with `eidas_inspect_core.models`. `StrEnum`
+  values serialize as their plain string values automatically.
+- **`/api/report` takes the already-computed JSON result, not the PDF
+  file again.** The PRD allows either ("accepts verdict JSON, or
+  re-verifies in-request"); accepting JSON avoids re-uploading the file
+  and re-asking for its password just to render a summary of a verdict
+  already computed, and keeps the endpoint trivially fast (local
+  rendering only, not rate-limited). Renders via reportlab
+  (`SimpleDocTemplate` flowables, `pageCompression=0` so the rendered text
+  -- including the SHA-256 footer -- is verifiably present in the raw PDF
+  bytes, not just asserted by trusting reportlab): verdict banner
+  (color-coded, plain-language, matching `plain_summary`), a per-item
+  table (Type/Level/Who/Integrity/When/Trust chain/Revocation), each
+  item's `plain_explanation`, SHA-256 + generation timestamp footer, and
+  the PRD's Article-33 disclaimer. One page for the realistic 1–3-signature
+  case.
+- **Typed errors, one envelope shape**: `{"error": {"code": "...",
+  "message": "..."}}` for every failure -- `not_a_pdf` (400, checked via
+  `%PDF-` magic bytes before core even runs, so a wrong-file-type upload
+  gets the PRD's exact "PDF only for now" copy rather than a generic
+  parse failure), `corrupted_pdf` / `password_required` /
+  `incorrect_password` (400, straight from core's typed exceptions via
+  FastAPI exception handlers), `file_too_large` (413), `rate_limited`
+  (429, via slowapi). No raw exception ever reaches the client.
+- **Rate limiting (slowapi) is a process-wide `Limiter` singleton**, since
+  slowapi's `@limiter.limit(...)` decorator binds to whatever `Limiter`
+  object exists at route-*definition* time (module import), not one
+  freshly created per `create_app()` call. Fine for production (one
+  process, one limiter); for test isolation, an autouse fixture calls
+  `limiter.reset()` between every test so one test's quota never bleeds
+  into the next.
+- **Anonymous counters really are minimal**: one SQLite table,
+  `(date, verdict, count)`, upserted per completed verification. No IP, no
+  filename, no document content -- matches the PRD's persistent-storage
+  line item exactly, not a superset of it.
+- **Tests reuse core's own test fixtures rather than duplicating
+  them**, since `core` was to stay untouched: `api/tests/conftest.py` adds
+  `core/tests` to `sys.path` and imports `pdf_fixtures`/
+  `trust_list_fixtures` directly (self-signed/CA-issued certs, CRL/OCSP
+  builders, synthetic Trusted List registries) -- the same offline,
+  no-real-network approach as core's own suite, just reused rather than
+  reinvented. A `TestClient` must be entered as a context manager for
+  FastAPI's `lifespan` (and therefore `app.state.trust_list_cache`) to run
+  at all -- caught immediately by every test failing with
+  `AttributeError: 'State' object has no attribute 'trust_list_cache'` on
+  the first run; the `app_factory` fixture now enters/exits the client
+  itself so individual tests don't have to remember to.
+- **14 API tests, all through `TestClient` against the real HTTP surface**
+  (no calling route functions directly): confirmed-qualified → `trusted`
+  JSON; plain advanced signature → `partial`; unsigned → `no-signatures`;
+  not-a-PDF, corrupted, oversized, password-required, wrong-password,
+  correct-password; the 11th verification in an hour → 429 (and
+  `/api/health` staying exempt); `/api/report` returning a real,
+  parseable single-page PDF with the SHA-256 verifiably present in its
+  bytes. 58/58 across `core/` + `api/` combined.
+- **Live end-to-end confirmation**: started the server locally, curled
+  `/api/verify` with `Demo document.pdf` while the background Trusted
+  List refresh was still running, got back the identical honest verdict
+  core produced directly (`partial`, "the signature is valid but not
+  qualified") as real JSON over HTTP; piped that JSON into `/api/report`
+  and got back a real, valid single-page PDF. Server logs contained
+  pyHanko's own certificate-chain diagnostics but never the filename,
+  password, or document content -- ephemerality held under a real request,
+  not just by inspection of the code.
 
-1. `POST /api/verify` (multipart PDF + optional password, 50 MB cap,
-   returns `VerificationResult` as JSON) and `POST /api/report` (PDF report
-   generation, reportlab/weasyprint).
-2. Own the `TrustListCache` lifecycle: refresh once at startup (or decide
-   to serve degraded until the first refresh completes — an explicit open
-   question from the Trusted List work), then a 24h refresh loop (FastAPI
-   lifespan background task). Core deliberately exposes `refresh()` as a
-   bare coroutine for exactly this.
-3. Decide the default `check_revocation` behavior for the live API (the
-   core defaults it to `False`) and whether/how a request can opt in or out
-   given the added latency of live OCSP/CRL fetches.
-4. IP-based rate limiting (10/hour, slowapi), anonymous SQLite counters
-   (date, count, verdict distribution — nothing else), ephemerality
-   enforcement (file bytes in request scope only, filenames/content never
-   logged), health endpoint, serving the built frontend as static files.
+## Next: Day 4+ per BUILD_GUIDE.md — the React frontend
+
+`api/` is done enough to build against: `POST /api/verify` (multipart +
+optional password → full JSON verdict), `POST /api/report` (JSON → PDF),
+`GET /api/health`, typed errors, rate limiting. Day 4/5 per BUILD_GUIDE.md:
+
+1. Landing page (drop zone / tap-to-upload, ephemerality trust promise),
+   password-prompt state, animated step-sequence loading state, verdict
+   page (traffic-light banner using `plain_summary` + per-item cards using
+   the six fields), neutral unsigned state with signing suggestions,
+   educational tooltips (Qualified/QES/QSeal/Trusted List/timestamp),
+   download-report button wired to `/api/report`, friendly error/rate-limit
+   states surfaced from the `error.code`/`error.message` envelope.
+   Mobile-first responsive, per PRD §3/§7.
+2. A pure visual design pass: distinctive type pairing, a palette where
+   the traffic-light colors feel native, explicitly not Scrive's brand.
+3. Wire the built frontend into `api/static/` (currently a placeholder
+   `index.html`) so the FastAPI app serves it from the same origin/port.
+4. Root Dockerfile building both `core`+`api` (Python) and the built
+   frontend (Node) into one image, per BUILD_GUIDE.md Day 6 -- not started.
+
+Also still open from earlier days, unaffected by Day 3:
+- A real QES-signed document has still not been confirmed to exercise the
+  full `TRUSTED` path end-to-end (see the Day 1/2 open item above).
+- Revocation/path-validation-as-of-signing-time (vs. as-of-now) remains a
+  stated simplification, not fixed.
+- The Subject-`C=` territory-attribution heuristic remains deliberately
+  unimplemented (v2 candidate).
