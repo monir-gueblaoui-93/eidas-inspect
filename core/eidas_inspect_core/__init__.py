@@ -6,12 +6,15 @@ from .errors import (
 )
 from .models import (
     IntegrityStatus,
+    RevocationSource,
     RevocationStatus,
     SignatureItem,
     SignatureLevel,
     SignatureType,
     TimestampQuality,
     TrustChainStatus,
+    VerdictBreakdown,
+    VerdictReason,
     VerificationResult,
     VerificationVerdict,
 )
@@ -26,6 +29,7 @@ __all__ = [
     'PasswordRequiredError',
     'IntegrityStatus',
     'RevocationFetchers',
+    'RevocationSource',
     'RevocationStatus',
     'SignatureItem',
     'SignatureLevel',
@@ -34,6 +38,8 @@ __all__ = [
     'TrustChainStatus',
     'TrustListCache',
     'TrustListSnapshot',
+    'VerdictBreakdown',
+    'VerdictReason',
     'VerificationResult',
     'VerificationVerdict',
     'verify_pdf',

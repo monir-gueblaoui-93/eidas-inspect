@@ -35,6 +35,7 @@ class SignatureItemOut(BaseModel):
     timestamp_quality: str
     trust_chain_status: str
     revocation_status: str
+    revocation_source: str | None
     verdict_reason: str
 
 

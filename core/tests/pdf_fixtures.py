@@ -3,7 +3,7 @@
 import io
 from datetime import datetime, timedelta, timezone
 
-from asn1crypto import keys, x509 as asn1_x509
+from asn1crypto import crl as asn1_crl, keys, ocsp as asn1_ocsp, x509 as asn1_x509
 from cryptography import x509 as cx509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -20,6 +20,7 @@ from pyhanko.sign.ades.qualified_asn1 import (
     QcStatements as PyhankoQcStatements,
 )
 from pyhanko.sign.timestamps import DummyTimeStamper
+from pyhanko.sign.validation.dss import DocumentSecurityStore
 from pyhanko_certvalidator.registry import SimpleCertificateStore
 
 QC_STATEMENTS_EXTENSION_OID = '1.3.6.1.5.5.7.1.3'
@@ -219,12 +220,21 @@ def generate_ca_issued_signer(
     qc_compliance: bool = False,
     qc_sscd: bool = False,
     qc_type_oid: str | None = None,
+    not_valid_before: datetime | None = None,
+    not_valid_after: datetime | None = None,
 ) -> tuple[SimpleSigner, cx509.Certificate]:
     """A leaf cert issued by ``ca_key``/``ca_subject`` (not self-signed),
     with CRL distribution point / OCSP responder extensions so revocation
     checking has somewhere to look. Returns the ``SimpleSigner`` plus the
     ``cryptography`` certificate object (needed to build matching CRLs/OCSP
-    responses in tests)."""
+    responses in tests).
+
+    ``not_valid_before``/``not_valid_after`` default to a normal one-year
+    window starting yesterday; pass a narrow, already-past window (e.g.
+    ``now - timedelta(minutes=20)`` to ``now - timedelta(minutes=5)``) to
+    model a short-lived, cloud/remote-QES-style signing certificate that's
+    expired by the time a test calls ``verify_pdf()``.
+    """
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     subject = cx509.Name(
         [
@@ -239,8 +249,8 @@ def generate_ca_issued_signer(
         .issuer_name(ca_subject)
         .public_key(key.public_key())
         .serial_number(cx509.random_serial_number())
-        .not_valid_before(now - timedelta(days=1))
-        .not_valid_after(now + timedelta(days=365))
+        .not_valid_before(not_valid_before or (now - timedelta(days=1)))
+        .not_valid_after(not_valid_after or (now + timedelta(days=365)))
         .add_extension(
             cx509.KeyUsage(
                 digital_signature=True,
@@ -341,10 +351,22 @@ def build_ocsp_response(
     *,
     revoked: bool = False,
     revocation_time: datetime | None = None,
+    produced_at: datetime | None = None,
 ) -> bytes:
     """A real, signed OCSP response for ``leaf_cert_cx``, from the CA acting
-    as its own OCSP responder (fine for test purposes)."""
-    now = datetime.now(timezone.utc)
+    as its own OCSP responder (fine for test purposes).
+
+    ``produced_at`` defaults to real "now" and sets the response's
+    ``this_update``/``next_update`` window (a narrow one hour either side).
+    For a point-in-time (embedded/DSS) scenario, pass the actual signing
+    moment: pyhanko_certvalidator's freshness check evaluates a response's
+    usability *as of the validation context's own moment*, not wall-clock
+    time, so a response whose ``this_update`` is wall-clock "now" gets
+    rejected as "too new" when checked against a moment from the past --
+    exactly mirroring why real QTSPs capture OCSP proof at signing time
+    rather than leaving it to be fetched fresh later.
+    """
+    now = produced_at or datetime.now(timezone.utc)
     if revoked:
         cert_status = cx_ocsp.OCSPCertStatus.REVOKED
         revocation_reason = cx509.ReasonFlags.unspecified
@@ -361,8 +383,8 @@ def build_ocsp_response(
             issuer=ca_cert_cx,
             algorithm=hashes.SHA1(),
             cert_status=cert_status,
-            this_update=now,
-            next_update=now + timedelta(days=1),
+            this_update=now - timedelta(hours=1),
+            next_update=now + timedelta(hours=1),
             revocation_time=revocation_time,
             revocation_reason=revocation_reason,
         )
@@ -370,6 +392,61 @@ def build_ocsp_response(
         .sign(ca_key, hashes.SHA256())
     )
     return response.public_bytes(serialization.Encoding.DER)
+
+
+def sign_pdf_with_timestamp(
+    pdf_bytes: bytes,
+    signer: SimpleSigner,
+    timestamper: DummyTimeStamper,
+    field_name: str = 'Signature1',
+) -> bytes:
+    """Like :func:`sign_pdf_bytes`, but with an embedded content timestamp
+    from a caller-supplied timestamper -- pass a ``DummyTimeStamper(...,
+    fixed_dt=...)`` to control the asserted timestamp time (e.g. to backdate
+    it to fall inside a short-lived signing certificate's validity window)."""
+    w = IncrementalPdfFileWriter(io.BytesIO(pdf_bytes), strict=False)
+    return sign_pdf(
+        w,
+        PdfSignatureMetadata(field_name=field_name),
+        signer=signer,
+        timestamper=timestamper,
+    ).getvalue()
+
+
+def add_dss_to_pdf(
+    pdf_bytes: bytes,
+    *,
+    certs: list = (),
+    ocsp_responses_der: list = (),
+    crls_der: list = (),
+) -> bytes:
+    """Embed a ``/DSS`` (Document Security Store) into a signed PDF,
+    carrying the given certs/OCSP responses/CRLs -- simulates the
+    revocation-info capture a real QTSP performs at signing time for
+    PAdES-LTA, which is what keeps a short-lived signing certificate
+    checkable long after it expires.
+
+    ``certs`` are ``cryptography`` certificate objects;
+    ``ocsp_responses_der``/``crls_der`` are raw DER bytes, matching
+    :func:`build_ocsp_response`/:func:`build_crl`'s return type.
+    """
+    parsed_certs = [
+        asn1_x509.Certificate.load(c.public_bytes(serialization.Encoding.DER))
+        for c in certs
+    ]
+    parsed_ocsps = [asn1_ocsp.OCSPResponse.load(d) for d in ocsp_responses_der]
+    parsed_crls = [asn1_crl.CertificateList.load(d) for d in crls_der]
+
+    buf = io.BytesIO(pdf_bytes)
+    DocumentSecurityStore.add_dss(
+        buf,
+        None,
+        certs=parsed_certs,
+        ocsps=parsed_ocsps,
+        crls=parsed_crls,
+        force_write=True,
+    )
+    return buf.getvalue()
 
 
 def tamper_page_after_signing(pdf_bytes: bytes) -> bytes:

@@ -357,14 +357,6 @@ report. Day 4+ is the React frontend — see "Next" below.
 
 ## Open items
 
-- **Verify a real Scrive QES (Global variant) document.** `Demo
-  document.pdf` (used for manual spot-checks, gitignored, not committed)
-  turned out to carry **no qcStatements extension at all**, so it
-  classifies as `ADVANCED` — we have not yet seen a real file produce a
-  `QUALIFIED` result end-to-end. Before calling the classifier "done,"
-  source a genuinely QES-signed Scrive document (Global/qualified variant)
-  and confirm it reports `level=QUALIFIED`, `type=SIGNATURE`, with the
-  expected plain-language copy.
 - **Subject-`C=` country-attribution heuristic (v2 candidate)**: dropped for
   v1's degraded-mode logic (see above) in favor of a simpler, always-honest
   rule that never narrows "unavailable" down to a specific territory. If
@@ -377,19 +369,6 @@ report. Day 4+ is the React frontend — see "Next" below.
   it yet. The API layer (Day 3+) needs to: call it once at startup (or
   decide to serve degraded until the first refresh completes), then run it
   on a 24h loop (e.g. a FastAPI lifespan background task).
-- **Revocation is checked as of verification time, not signing time** — see
-  the "known simplification" note above. Not incorrect for a currently-valid
-  cert, but not full point-in-time AdES semantics for old signatures either.
-- **Still haven't seen a real document exercise the full `TRUSTED` path, or
-  the `GOOD`/`REVOKED` revocation states, end-to-end.** `Demo document.pdf`
-  (verified live with `check_revocation=True` against the real EU LOTL)
-  correctly lands on `PARTIAL` — "the signature is valid but not qualified"
-  — because it has no qcStatements extension at all (see the QES open item
-  above) and its issuer doesn't resolve against Trusted List data anyway,
-  so `revocation_status` stays `NOT_CHECKED` (no path, nothing to walk).
-  Every state has been proven correct against real cryptographic fixtures
-  in tests; a genuinely QES-signed real document is what's needed to see
-  `TRUSTED` fire outside of tests.
 
 ## Done (Day 3): the FastAPI `api/` layer
 
@@ -507,6 +486,97 @@ report. Day 4+ is the React frontend — see "Next" below.
   password, or document content -- ephemerality held under a real request,
   not just by inspection of the code.
 
+## Done: point-in-time validation (short-lived QES certs)
+
+Triggered by verifying a real QES-signed document (`qes_document.pdf`,
+gitignored, never committed): it came back `PARTIAL` instead of the
+expected `TRUSTED`. Root cause -- diagnosed by reading
+`pyhanko_certvalidator` source, not guessing -- was that the signing
+certificate is short-lived (~15 min validity, standard for cloud/remote
+QES providers) and had already expired by verification time, so the
+library's own validity-period check aborted before revocation checking
+ever ran. Fixed as the mainline case, not an edge case: short-lived
+certs are how most real QES providers work, so without point-in-time
+validation the product could never say `TRUSTED` on real documents.
+
+- **Two-pass model per signature/timestamp item.** Pass 1 (discovery):
+  validate with no revocation fetching, no DSS, `moment=now`, purely to
+  extract the item's signing time and timestamp quality. Pass 2 (real
+  validation): re-validate with a point-in-time `moment` set from pass
+  1's result, DSS-aware, revocation fetching enabled. The reference
+  moment is the verified embedded timestamp when one exists and isn't
+  merely claimed; **the unverified, self-reported `/M` signing time is
+  never used to anchor point-in-time validation** -- that would let a
+  forged claimed time launder an already-revoked or expired certificate.
+  Without a verified timestamp, behavior is unchanged from before this
+  feature: checked as of "now," conservatively.
+- **Applied uniformly**, per explicit decision, to the main signer cert,
+  embedded-timestamp-within-signature sub-checks, and standalone
+  `/DocTimeStamp` items alike -- consistency over minimalism.
+- **DSS-aware revocation**: before either pass, the document's own
+  `/DSS` (PAdES-LTA Document Security Store) is read once via pyHanko's
+  `DocumentSecurityStore.read_dss()`. `TrackedCRLFetcher`/
+  `TrackedOCSPFetcher` now check the DSS's embedded OCSP responses/CRLs
+  for a match *before* attempting any live fetch -- this is what lets an
+  already-expired short-lived cert still be confirmed `GOOD` long after
+  expiry, from the proof captured at signing time. Matching is by
+  certificate serial number / issuer (not a full RFC 6960 CertID hash);
+  this is intentionally informational-labeling only and never gates the
+  actual revocation decision, which stays entirely
+  `pyhanko_certvalidator`'s -- a bad match just fails safe (falls through
+  to live fetch, or a signature-verification rejection deeper in the
+  library), it can't produce a wrong revocation answer. Full CertID-hash
+  matching is the natural v2 upgrade.
+- **New field: `RevocationSource` (`embedded` / `live`) on
+  `SignatureItem`**, added now rather than later specifically because the
+  API had already shipped and nothing yet consumed the string-only
+  `technical_detail` prose -- this was the cheapest moment to add a real
+  structured field instead of forcing a future frontend to parse prose to
+  tell "confirmed via the document's own proof" from "confirmed via a
+  live check just now." `None` when nothing answered the revocation
+  question at all (`UNAVAILABLE`/`NOT_CHECKED`).
+- **Real bug found and fixed along the way**: `pyhanko_certvalidator`'s
+  own OCSP retrieval (`RevinfoManager.async_retrieve_ocsps`) prioritizes a
+  *live* fetch over pre-loaded/DSS data whenever the cert declares an
+  OCSP URL and fetching is enabled -- the opposite of its CRL handling,
+  which correctly prefers already-available data first. Found via a test
+  that returned `GOOD` where it should have returned `REVOKED` (a DSS-
+  embedded revoked response was being ignored in favor of a live fetch in
+  the test's world that would have found nothing). Fixed by making the
+  tracked fetchers themselves DSS-first, independent of
+  `pyhanko_certvalidator`'s internal precedence, so "DSS data wins when
+  present" is guaranteed at this project's layer rather than assumed from
+  the library's.
+- **Test-fixture bug found and fixed**: `build_ocsp_response()` always
+  stamped `this_update` at wall-clock "now," so a DSS response built to
+  represent "captured at signing time" failed `pyhanko_certvalidator`'s
+  own OCSP freshness check (`usable_at()`) when evaluated against a
+  signing moment safely in the past. Fixed by adding a `produced_at`
+  param threaded through from each test's actual signing moment.
+- **6 new tests (`core/tests/test_point_in_time.py`)**: expired
+  short-lived cert confirmed `GOOD` via embedded DSS → `TRUSTED`; same via
+  live OCSP → `TRUSTED` with `revocation_source=LIVE`; revoked before the
+  signing moment → `NOT_TRUSTED`; revoked *after* the signing moment (the
+  classic AdES case) → still `TRUSTED`; expired cert with only a claimed
+  (unverified) time → stays conservative, `NOT_CHECKED`, never falsely
+  `TRUSTED`; a currently-valid cert with DSS data present → unaffected,
+  proving this is additive, not a behavior change for the common case.
+  64/64 across `core/` + `api/` combined, zero regressions.
+- **Plain-language framing as a product feature, not a caveat**: the
+  `TRUSTED` explanation for a qualified, trust-chain-confirmed signature
+  now reads "...valid and qualified **at the time of signing**" --
+  point-in-time correctness stated as the plain-language guarantee it
+  actually is.
+- **Acceptance test**: re-ran `qes_document.pdf` live end-to-end (real
+  Trusted List refresh, `check_revocation=True`). Result: `verdict:
+  trusted`, `level: qualified`, `trust_chain_status: trusted`,
+  `revocation_status: good`, `revocation_source: embedded`,
+  `verdict_reason: confirmed_qualified`, plain explanation ending "...
+  valid and qualified at the time of signing." `revocation_source=embedded`
+  is the proof this is genuine and not a lucky live-fetch success: the
+  document's own OCSP proof, captured at signing time, is what confirmed
+  a certificate that had long since expired by verification time.
+
 ## Next: Day 4+ per BUILD_GUIDE.md — the React frontend
 
 `api/` is done enough to build against: `POST /api/verify` (multipart +
@@ -528,10 +598,10 @@ optional password → full JSON verdict), `POST /api/report` (JSON → PDF),
 4. Root Dockerfile building both `core`+`api` (Python) and the built
    frontend (Node) into one image, per BUILD_GUIDE.md Day 6 -- not started.
 
-Also still open from earlier days, unaffected by Day 3:
-- A real QES-signed document has still not been confirmed to exercise the
-  full `TRUSTED` path end-to-end (see the Day 1/2 open item above).
-- Revocation/path-validation-as-of-signing-time (vs. as-of-now) remains a
-  stated simplification, not fixed.
+Also still open from earlier days:
 - The Subject-`C=` territory-attribution heuristic remains deliberately
   unimplemented (v2 candidate).
+- CertID-hash matching for DSS-embedded revocation data (vs. today's
+  serial/issuer match) is a v2 upgrade if serial collisions across
+  issuers ever become a practical concern (see the point-in-time
+  validation section above).

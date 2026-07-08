@@ -14,6 +14,8 @@ from pyhanko.sign.validation.pdf_embedded import (
     async_validate_pdf_timestamp,
     collect_embedded_signatures,
 )
+from pyhanko.sign.validation.dss import DocumentSecurityStore
+from pyhanko.sign.validation.errors import NoDSSFoundError
 from pyhanko.sign.validation.qualified.assess import QualificationAssessor
 from pyhanko.sign.validation.qualified.tsp import TSPTrustManager
 from pyhanko.sign.validation.status import SignatureCoverageLevel
@@ -23,6 +25,7 @@ from pyhanko_certvalidator.path import ValidationPath
 from .errors import CorruptedPdfError, IncorrectPasswordError, PasswordRequiredError
 from .models import (
     IntegrityStatus,
+    RevocationSource,
     RevocationStatus,
     SignatureItem,
     SignatureLevel,
@@ -35,7 +38,13 @@ from .models import (
     VerificationVerdict,
 )
 from .qc_statements import QcStatements, extract_qc_statements
-from .revocation import RevocationFetchers, TrackedCRLFetcher, TrackedOCSPFetcher, build_fetchers
+from .revocation import (
+    RevocationFetchers,
+    TrackedCRLFetcher,
+    TrackedOCSPFetcher,
+    build_fetchers,
+    dss_covers_cert,
+)
 from .trust_list import TrustListSnapshot
 
 
@@ -62,12 +71,19 @@ def verify_pdf(
             verdict_breakdown=None,
         )
 
-    validation_context, crl_fetcher, ocsp_fetcher = _build_validation_context(
-        trust_list, check_revocation, revocation_fetchers
-    )
+    dss = _read_dss(reader)
+    dss_ocsps, dss_crls = _dss_revocation_data(dss)
+
     items = [
         _build_signature_item(
-            sig, trust_list, validation_context, crl_fetcher, ocsp_fetcher, verified_at
+            sig,
+            trust_list,
+            check_revocation,
+            revocation_fetchers,
+            dss,
+            dss_ocsps,
+            dss_crls,
+            verified_at,
         )
         for sig in embedded_sigs
     ]
@@ -82,13 +98,35 @@ def verify_pdf(
     )
 
 
+def _read_dss(reader: PdfFileReader) -> DocumentSecurityStore | None:
+    try:
+        return DocumentSecurityStore.read_dss(reader)
+    except NoDSSFoundError:
+        return None
+
+
+def _dss_revocation_data(dss: DocumentSecurityStore | None) -> tuple[list, list]:
+    """Parse a document's embedded ``/DSS`` OCSP responses and CRLs (if any)
+    into asn1crypto objects, once per document, for the "does the document
+    already carry proof for this cert" check (see :func:`.revocation.dss_covers_cert`).
+    """
+    if dss is None:
+        return [], []
+    vc = dss.as_validation_context({})
+    return list(vc.ocsps), list(vc.crls)
+
+
 def _build_validation_context(
     trust_list: TrustListSnapshot | None,
     check_revocation: bool,
     revocation_fetchers: RevocationFetchers | None,
+    *,
+    dss: DocumentSecurityStore | None = None,
+    dss_ocsps: list | None = None,
+    dss_crls: list | None = None,
+    moment: datetime | None = None,
 ) -> tuple[ValidationContext | None, TrackedCRLFetcher | None, TrackedOCSPFetcher | None]:
-    """Build the (optional) shared validation context for this verification
-    call.
+    """Build a validation context.
 
     Revocation checking is only meaningful alongside a Trusted List snapshot
     (there would be no trust anchor to build a path against otherwise), so
@@ -96,6 +134,31 @@ def _build_validation_context(
     Without it, this preserves the exact pre-revocation behavior: no
     fetching, no network calls, ``trust_chain_status`` stays whatever the
     Trusted List wiring alone produces.
+
+    When ``dss`` is given, the document's own embedded certs are merged in
+    via ``DocumentSecurityStore.as_validation_context`` (helps path-building
+    when an intermediate CA is only carried in the DSS, not the CMS).
+    ``dss_ocsps``/``dss_crls`` are passed straight through to
+    :func:`.revocation.build_fetchers`, which makes our own tracked fetchers
+    check them *before* ever attempting a live fetch -- this is the part
+    that actually matters: pyhanko_certvalidator's own OCSP retrieval
+    prefers a live fetch over pre-loaded data whenever the cert declares an
+    OCSP URL and fetching is enabled (unlike its CRL handling, which
+    correctly prefers already-available data), so relying on
+    ``as_validation_context`` alone would silently skip the document's own
+    embedded proof for any cert that also has a live OCSP endpoint --
+    exactly the shape of a real QTSP-issued short-lived certificate. This is
+    what makes an expired short-lived signing certificate checkable long
+    after the fact: the revocation proof was captured into the document at
+    signing time, precisely so it wouldn't depend on a live responder still
+    answering for a long-expired serial.
+
+    ``moment`` governs point-in-time validation (both the certificate
+    validity-period check and, per pyhanko_certvalidator's own
+    ``control_time`` logic, whether a *later* revocation still invalidates
+    an earlier-valid signature). Callers must never pass an unverified,
+    self-reported time here -- see the security note in
+    :func:`_build_signature_item`.
     """
     if trust_list is None:
         return None, None, None
@@ -104,14 +167,20 @@ def _build_validation_context(
     fetchers = None
     if check_revocation:
         fetchers, crl_fetcher, ocsp_fetcher = build_fetchers(
-            revocation_fetchers or RevocationFetchers()
+            revocation_fetchers or RevocationFetchers(),
+            dss_ocsps=dss_ocsps or (),
+            dss_crls=dss_crls or (),
         )
 
-    validation_context = ValidationContext(
+    kwargs = dict(
         trust_manager=TSPTrustManager(trust_list.registry),
         allow_fetching=check_revocation,
         fetchers=fetchers,
         revocation_mode='soft-fail',
+        moment=moment,
+    )
+    validation_context = (
+        dss.as_validation_context(kwargs) if dss is not None else ValidationContext(**kwargs)
     )
     return validation_context, crl_fetcher, ocsp_fetcher
 
@@ -140,9 +209,11 @@ def _open_reader(data: bytes, password: str | None) -> PdfFileReader:
 def _build_signature_item(
     embedded_sig: EmbeddedPdfSignature,
     trust_list: TrustListSnapshot | None,
-    validation_context: ValidationContext | None,
-    crl_fetcher: TrackedCRLFetcher | None,
-    ocsp_fetcher: TrackedOCSPFetcher | None,
+    check_revocation: bool,
+    revocation_fetchers: RevocationFetchers | None,
+    dss: DocumentSecurityStore | None,
+    dss_ocsps: list,
+    dss_crls: list,
     verified_at: datetime,
 ) -> SignatureItem:
     is_timestamp = embedded_sig.sig_object_type == '/DocTimeStamp'
@@ -150,6 +221,65 @@ def _build_signature_item(
         SignatureType.TIMESTAMP if is_timestamp else SignatureType.SIGNATURE
     )
 
+    # Pass 1 (discovery): crypto facts + signing time only. No revocation
+    # fetching, no DSS, moment=now -- its trust/revocation conclusions are
+    # provisional and always get replaced by pass 2's point-in-time-correct
+    # results below. This pass exists purely so we know *when* to evaluate
+    # pass 2 at.
+    discovery_context, _, _ = _build_validation_context(trust_list, False, None)
+    try:
+        if is_timestamp:
+            discovery_status = asyncio.run(
+                async_validate_pdf_timestamp(embedded_sig, discovery_context)
+            )
+        else:
+            discovery_status = asyncio.run(
+                async_validate_pdf_signature(
+                    embedded_sig, signer_validation_context=discovery_context
+                )
+            )
+    except Exception as e:
+        return _unreadable_signature_item(provisional_type, e)
+
+    discovery_signing_time, discovery_timestamp_quality = _signing_time_info(
+        is_timestamp, discovery_status
+    )
+
+    # SECURITY: a verified timestamp (embedded RFC 3161 token, or a
+    # standalone /DocTimeStamp's own asserted time) is the only thing
+    # allowed to anchor point-in-time validation. A bare self-reported
+    # claim (/M, CLAIMED_ONLY) never does: pyhanko_certvalidator only
+    # excuses a *later* revocation from invalidating a signature when an
+    # explicit `moment` is passed (its own "control_time" logic) -- feeding
+    # it an unverified time would let a forged /M value launder a
+    # certificate that was already revoked or expired at the real signing
+    # time. Leaving this unset for the unverified case preserves today's
+    # conservative behavior exactly (checked as of "now", any revocation is
+    # always fatal).
+    reference_moment = (
+        discovery_signing_time
+        if is_timestamp
+        or discovery_timestamp_quality is not TimestampQuality.CLAIMED_ONLY
+        else None
+    )
+
+    # Pass 2 (real validation): point-in-time correct, and DSS-aware (when
+    # revocation checking is requested at all) so the document's own
+    # embedded revocation record is consulted before ever falling back to a
+    # live fetch. DSS consultation is gated behind check_revocation just
+    # like live fetching -- otherwise a revoked-per-embedded-proof cert
+    # could populate status.revocation_details even with
+    # check_revocation=False, which _assess_revocation's "no fetchers ->
+    # not checked" gate would then incorrectly shadow.
+    validation_context, crl_fetcher, ocsp_fetcher = _build_validation_context(
+        trust_list,
+        check_revocation,
+        revocation_fetchers,
+        dss=dss if check_revocation else None,
+        dss_ocsps=dss_ocsps if check_revocation else None,
+        dss_crls=dss_crls if check_revocation else None,
+        moment=reference_moment,
+    )
     try:
         if is_timestamp:
             status = asyncio.run(
@@ -181,16 +311,7 @@ def _build_signature_item(
     coverage_name = status.coverage.name if status.coverage is not None else 'UNKNOWN'
     signing_time, timestamp_quality = _signing_time_info(is_timestamp, status)
 
-    # Only use signing_time as the qualification "moment" when it comes from
-    # a verified timestamp, not a bare self-reported claim -- otherwise a
-    # forged /M value could be used to pick a moment when a since-withdrawn
-    # CA was still granted.
-    qualification_moment = (
-        signing_time
-        if signing_time is not None
-        and timestamp_quality is not TimestampQuality.CLAIMED_ONLY
-        else verified_at
-    )
+    qualification_moment = reference_moment if reference_moment is not None else verified_at
     trust_chain_status, trust_note = _assess_trust_chain(
         status.validation_path, qualification_moment, trust_list, verified_at
     )
@@ -213,11 +334,13 @@ def _build_signature_item(
             if ts_trust_status is TrustChainStatus.TRUSTED:
                 timestamp_quality = TimestampQuality.QUALIFIED_TSA
 
-    revocation_status, revocation_note = _assess_revocation(
+    dss_covers = dss_covers_cert(status.signing_cert, dss_ocsps, dss_crls)
+    revocation_status, revocation_note, revocation_source = _assess_revocation(
         status.signing_cert,
         status.revocation_details,
         crl_fetcher,
         ocsp_fetcher,
+        dss_covers,
     )
 
     verdict_reason = _classify_verdict_reason(
@@ -249,6 +372,7 @@ def _build_signature_item(
         timestamp_quality=timestamp_quality,
         trust_chain_status=trust_chain_status,
         revocation_status=revocation_status,
+        revocation_source=revocation_source,
         verdict_reason=verdict_reason,
     )
 
@@ -299,7 +423,8 @@ def _assess_revocation(
     revocation_details,
     crl_fetcher: TrackedCRLFetcher | None,
     ocsp_fetcher: TrackedOCSPFetcher | None,
-) -> tuple[RevocationStatus, str | None]:
+    dss_covers: bool,
+) -> tuple[RevocationStatus, str | None, RevocationSource | None]:
     """Map pyHanko's ``revocation_details`` (if any) plus our own
     fetch-outcome tracking onto :class:`RevocationStatus`.
 
@@ -309,15 +434,40 @@ def _assess_revocation(
     outcome tracking on our own fetchers (see :mod:`.revocation`) is what
     lets those two cases be told apart honestly, instead of reporting a
     clean bill of health when the check never actually happened.
+
+    ``dss_covers`` (see :func:`.revocation.dss_covers_cert`) is informational
+    labeling only -- it decides whether we report
+    :attr:`RevocationSource.EMBEDDED` instead of a plain live-fetch result,
+    never whether the certificate is revoked. That decision was already made
+    by pyhanko_certvalidator, via the same DSS data, before this function
+    ever runs.
     """
     if crl_fetcher is None and ocsp_fetcher is None:
-        return RevocationStatus.NOT_CHECKED, None
+        return RevocationStatus.NOT_CHECKED, None, None
 
     if revocation_details is not None:
         revoked_at = revocation_details.revocation_date
-        return RevocationStatus.REVOKED, (
+        source = RevocationSource.EMBEDDED if dss_covers else RevocationSource.LIVE
+        suffix = (
+            ", per the document's own embedded revocation record."
+            if dss_covers
+            else '.'
+        )
+        return (
+            RevocationStatus.REVOKED,
             f'This certificate was revoked on {revoked_at:%Y-%m-%d} at '
-            f'{revoked_at:%H:%M} UTC.'
+            f'{revoked_at:%H:%M} UTC{suffix}',
+            source,
+        )
+
+    if dss_covers:
+        return (
+            RevocationStatus.GOOD,
+            "No revocation was found, per the document's own embedded "
+            'revocation record (captured at signing time) -- this is what '
+            'keeps a short-lived signing certificate checkable long after '
+            'it expires.',
+            RevocationSource.EMBEDDED,
         )
 
     crl_outcome = crl_fetcher.outcome_for(cert) if crl_fetcher else None
@@ -328,12 +478,18 @@ def _assess_revocation(
     succeeded = (crl_outcome and crl_outcome.ok) or (ocsp_outcome and ocsp_outcome.ok)
 
     if not attempted:
-        return RevocationStatus.NOT_CHECKED, None
+        return RevocationStatus.NOT_CHECKED, None, None
     if succeeded:
-        return RevocationStatus.GOOD, 'No revocation was found via OCSP/CRL check.'
-    return RevocationStatus.UNAVAILABLE, (
+        return (
+            RevocationStatus.GOOD,
+            'No revocation was found via a live OCSP/CRL check just now.',
+            RevocationSource.LIVE,
+        )
+    return (
+        RevocationStatus.UNAVAILABLE,
         'Revocation status could not be confirmed: the OCSP/CRL endpoint(s) '
-        'for this certificate were unreachable or timed out.'
+        'for this certificate were unreachable or timed out.',
+        None,
     )
 
 
@@ -590,7 +746,8 @@ def _qualification_clause(
         if trust_chain_status is TrustChainStatus.TRUSTED:
             return (
                 f" The certificate declares this a qualified {noun}, and the "
-                "issuing provider is confirmed on the EU Trusted List."
+                "issuing provider is confirmed on the EU Trusted List, valid "
+                "and qualified at the time of signing."
             )
         if trust_chain_status is TrustChainStatus.UNTRUSTED:
             return (

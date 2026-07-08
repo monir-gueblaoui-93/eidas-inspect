@@ -44,6 +44,7 @@ __all__ = [
     'build_fetchers',
     'default_fetch_crl',
     'default_fetch_ocsp',
+    'dss_covers_cert',
 ]
 
 DEFAULT_TIMEOUT_SECONDS = 5.0
@@ -103,9 +104,10 @@ class FetchOutcome:
 
 
 class TrackedCRLFetcher(CRLFetcher):
-    def __init__(self, fetch: CrlBytesFetch, timeout_seconds: float):
+    def __init__(self, fetch: CrlBytesFetch, timeout_seconds: float, dss_crls=()):
         self._fetch = fetch
         self._timeout = timeout_seconds
+        self._dss_crls = list(dss_crls)
         self._crls_by_cert: dict[bytes, list] = {}
         self._outcome_by_cert: dict[bytes, FetchOutcome] = {}
 
@@ -115,6 +117,20 @@ class TrackedCRLFetcher(CRLFetcher):
     async def fetch(self, cert, *, use_deltas=None):
         key = issuer_serial(cert)
         outcome = self._outcome_by_cert.setdefault(key, FetchOutcome())
+
+        # Prefer the document's own embedded CRLs over a live fetch, if any
+        # cover this cert -- pyhanko_certvalidator itself already prefers
+        # already-available CRL data over fetching more, but we check here
+        # too rather than depend on that: it keeps this fetcher's contract
+        # ("DSS first") true regardless of pyhanko_certvalidator's own
+        # internal precedence, which (see TrackedOCSPFetcher) isn't
+        # consistent between CRL and OCSP.
+        dss_matches = _matching_dss_crls(cert, self._dss_crls)
+        if dss_matches:
+            outcome.attempted = True
+            self._crls_by_cert[key] = dss_matches
+            return dss_matches
+
         sources = get_relevant_crl_dps(cert, use_deltas=use_deltas)
         if not sources:
             # No CRL distribution point on the cert at all -- nothing to
@@ -152,9 +168,10 @@ class TrackedCRLFetcher(CRLFetcher):
 
 
 class TrackedOCSPFetcher(OCSPFetcher):
-    def __init__(self, fetch: OcspBytesFetch, timeout_seconds: float):
+    def __init__(self, fetch: OcspBytesFetch, timeout_seconds: float, dss_ocsps=()):
         self._fetch = fetch
         self._timeout = timeout_seconds
+        self._dss_ocsps = list(dss_ocsps)
         self._responses: dict[tuple, ocsp.OCSPResponse] = {}
         self._outcome_by_cert: dict[bytes, FetchOutcome] = {}
 
@@ -164,6 +181,24 @@ class TrackedOCSPFetcher(OCSPFetcher):
     async def fetch(self, cert, authority):
         cert_key = issuer_serial(cert)
         outcome = self._outcome_by_cert.setdefault(cert_key, FetchOutcome())
+
+        # Prefer the document's own embedded OCSP response over a live
+        # fetch, if one covers this cert. This isn't just an optimization:
+        # pyhanko_certvalidator's own OCSP retrieval
+        # (RevinfoManager.async_retrieve_ocsps) attempts a *live* fetch
+        # first whenever the cert declares an OCSP URL and fetching is
+        # enabled, using pre-loaded/DSS data only as a fallback -- the
+        # opposite of its CRL handling, which correctly prefers
+        # already-available data. Short-circuiting here is what actually
+        # makes a short-lived, already-expired certificate's embedded proof
+        # get used at all when it also has a (possibly now-unreachable)
+        # live OCSP endpoint -- exactly qes_document.pdf's real shape.
+        dss_match = _matching_dss_ocsp(cert, self._dss_ocsps)
+        if dss_match is not None:
+            outcome.attempted = True
+            self._responses[(cert_key, authority.hashable)] = dss_match
+            return dss_match
+
         urls = get_ocsp_urls(cert)
         if not urls:
             raise OCSPFetchError('No URLs to fetch OCSP responses from')
@@ -220,12 +255,14 @@ class _NullCertFetcher(CertificateFetcher):
 
 def build_fetchers(
     revocation_fetchers: RevocationFetchers,
+    dss_ocsps=(),
+    dss_crls=(),
 ) -> tuple[Fetchers, TrackedCRLFetcher, TrackedOCSPFetcher]:
     crl_fetcher = TrackedCRLFetcher(
-        revocation_fetchers.crl_fetch, revocation_fetchers.timeout_seconds
+        revocation_fetchers.crl_fetch, revocation_fetchers.timeout_seconds, dss_crls=dss_crls
     )
     ocsp_fetcher = TrackedOCSPFetcher(
-        revocation_fetchers.ocsp_fetch, revocation_fetchers.timeout_seconds
+        revocation_fetchers.ocsp_fetch, revocation_fetchers.timeout_seconds, dss_ocsps=dss_ocsps
     )
     fetchers = Fetchers(
         ocsp_fetcher=ocsp_fetcher,
@@ -233,3 +270,56 @@ def build_fetchers(
         cert_fetcher=_NullCertFetcher(),
     )
     return fetchers, crl_fetcher, ocsp_fetcher
+
+
+def _matching_dss_ocsp(cert, dss_ocsps) -> ocsp.OCSPResponse | None:
+    """Find a document-embedded OCSP response covering ``cert``, matched by
+    CertID serial number.
+
+    Matching is by serial number rather than a full RFC 6960 CertID hash
+    (hashAlgorithm + issuerNameHash + issuerKeyHash + serialNumber): a false
+    match here would hand pyhanko_certvalidator a response signed by the
+    wrong issuer for this validation context, which its own signature
+    verification rejects rather than silently trusting -- so imprecision
+    here fails safe (falls through to a live fetch or "no match"), it
+    doesn't produce a wrong revocation answer. Promoting this to full
+    CertID matching is the natural v2 upgrade if serial-number collisions
+    across issuers ever become a practical concern.
+    """
+    for response in dss_ocsps:
+        try:
+            tbs = response.basic_ocsp_response['tbs_response_data']
+            for single in tbs['responses']:
+                if single['cert_id']['serial_number'].native == cert.serial_number:
+                    return response
+        except Exception:
+            continue
+    return None
+
+
+def _matching_dss_crls(cert, dss_crls) -> list:
+    """Find document-embedded CRLs whose issuer matches ``cert``'s issuer --
+    see :func:`_matching_dss_ocsp` for the same fail-safe reasoning."""
+    matches = []
+    for cert_list in dss_crls:
+        try:
+            if cert_list.issuer == cert.issuer:
+                matches.append(cert_list)
+        except Exception:
+            continue
+    return matches
+
+
+def dss_covers_cert(cert, dss_ocsps, dss_crls) -> bool:
+    """Whether a document's own embedded ``/DSS`` data (a PAdES-LTA
+    Document Security Store) covers this certificate's revocation status --
+    used to report :attr:`~.models.RevocationSource.EMBEDDED` vs
+    :attr:`~.models.RevocationSource.LIVE`. Uses the same matching as the
+    tracked fetchers themselves (see :func:`_matching_dss_ocsp`/
+    :func:`_matching_dss_crls`), so the label always reflects what data was
+    actually available to answer the question.
+    """
+    return (
+        _matching_dss_ocsp(cert, dss_ocsps) is not None
+        or bool(_matching_dss_crls(cert, dss_crls))
+    )

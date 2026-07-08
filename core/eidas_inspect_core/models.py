@@ -50,6 +50,23 @@ class RevocationStatus(StrEnum):
     NOT_CHECKED = 'not_checked'
 
 
+class RevocationSource(StrEnum):
+    """Where a :attr:`RevocationStatus.GOOD`/:attr:`RevocationStatus.REVOKED`
+    answer came from. Only meaningful for those two statuses -- ``None`` on
+    :class:`SignatureItem` for :attr:`RevocationStatus.UNAVAILABLE`/
+    :attr:`RevocationStatus.NOT_CHECKED`, where no data answered the
+    question at all."""
+
+    EMBEDDED = 'embedded'
+    """From the document's own embedded revocation record (a PAdES-LTA
+    ``/DSS`` OCSP response or CRL, typically captured at signing time --
+    this is exactly what lets a short-lived signing certificate remain
+    checkable long after it expires)."""
+
+    LIVE = 'live'
+    """From a live OCSP/CRL fetch performed just now, at verification time."""
+
+
 class VerdictReason(StrEnum):
     """Why one :class:`SignatureItem` counted the way it did towards the
     document-level :class:`VerificationVerdict`. Exposed on every item so a
@@ -136,6 +153,7 @@ class SignatureItem:
     level: SignatureLevel = SignatureLevel.UNKNOWN
     trust_chain_status: TrustChainStatus = TrustChainStatus.UNKNOWN
     revocation_status: RevocationStatus = RevocationStatus.NOT_CHECKED
+    revocation_source: RevocationSource | None = None
     verdict_reason: VerdictReason = VerdictReason.NOT_QUALIFIED
 
 
