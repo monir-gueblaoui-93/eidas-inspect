@@ -39,6 +39,17 @@ class TimestampQuality(StrEnum):
     UNKNOWN = 'unknown'
 
 
+class RevocationStatus(StrEnum):
+    GOOD = 'good'
+    """Checked via OCSP and/or CRL; no revocation was found."""
+    REVOKED = 'revoked'
+    UNAVAILABLE = 'unavailable'
+    """A check was attempted but no confident answer could be reached right
+    now (the OCSP/CRL endpoint was unreachable or timed out). Distinct from
+    :attr:`NOT_CHECKED`, which means no check was attempted at all."""
+    NOT_CHECKED = 'not_checked'
+
+
 @dataclass(frozen=True)
 class IntegrityStatus:
     """Result of ByteRange/CMS integrity checking for one signature."""
@@ -75,6 +86,7 @@ class SignatureItem:
     timestamp_quality: TimestampQuality = TimestampQuality.UNKNOWN
     level: SignatureLevel = SignatureLevel.UNKNOWN
     trust_chain_status: TrustChainStatus = TrustChainStatus.UNKNOWN
+    revocation_status: RevocationStatus = RevocationStatus.NOT_CHECKED
 
 
 @dataclass(frozen=True)

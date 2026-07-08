@@ -148,6 +148,86 @@ Status as of 2026-07-08, end of Day 2 (per BUILD_GUIDE.md).
   `ValidationContext` is actually supplied; harmless to the existing 12
   Day-1 tests, which don't assert on certificate extensions.
 
+## Done (Day 2): OCSP/CRL revocation checking
+
+- **`eidas_inspect_core/revocation.py`**: reuses pyhanko_certvalidator's own
+  protocol-level helpers (CRLDP/AIA URL extraction, OCSP request/response
+  formatting) rather than reimplementing RFC 5280/RFC 6960 — same reuse
+  philosophy as the Trusted List engine. What's custom: `TrackedCRLFetcher`
+  / `TrackedOCSPFetcher`, minimal `CRLFetcher`/`OCSPFetcher` implementations
+  wrapping an **injectable async fetch callable** (`Callable[[str],
+  Awaitable[bytes]]` for CRL, `Callable[[str, bytes], Awaitable[bytes]]` for
+  OCSP — same shape as the Trusted List module's `Fetcher`), each call
+  wrapped in `asyncio.wait_for(timeout=5s)`. `RevocationFetchers` bundles
+  both callables + the timeout; defaults to real aiohttp GET/POST, tests
+  inject stubs — no real network calls in tests.
+- **Why a custom fetcher instead of pyhanko_certvalidator's own
+  `AIOHttpFetcherBackend`**: pyhanko_certvalidator's own "soft-fail" mode
+  (the mode this project uses, deliberately, so a bad endpoint never fails
+  the whole verdict) leaves `revocation_details` at `None` both when the
+  cert is genuinely fine **and** when the check couldn't be performed at
+  all — it doesn't expose that distinction anywhere. Each tracked fetcher
+  records, per certificate, whether a fetch was `attempted` and whether it
+  `failed`; `_assess_revocation()` in `verify.py` combines that with
+  pyHanko's `status.revocation_details` to tell `GOOD` (checked, clean),
+  `REVOKED` (checked, found in a CRL/OCSP response, with the revocation
+  date/time in the message), `UNAVAILABLE` (checked, endpoint unreachable
+  or timed out), and `NOT_CHECKED` (no CRLDP/AIA on the cert at all, or
+  `check_revocation=False`) apart honestly.
+- **`verify_pdf` gained `check_revocation: bool = False` and
+  `revocation_fetchers: RevocationFetchers | None = None`**.
+  `check_revocation` is a no-op unless `trust_list` is also supplied (no
+  trust anchor, no path, nothing to walk for revocation either) — matches
+  how the feature was scoped. When enabled, the shared `ValidationContext`
+  gets `allow_fetching=True` and the tracked fetchers; when disabled (the
+  default), behavior is byte-for-byte identical to before this change (no
+  `fetchers` param passed at all), so every Day-1/Day-2 TL test still
+  passes unmodified.
+- **`RevocationStatus` model field**, mirroring `TrustChainStatus`'s
+  honest-uncertainty pattern exactly (`GOOD` / `REVOKED` / `UNAVAILABLE` /
+  `NOT_CHECKED`). Revocation is deliberately its own field, not folded into
+  `IntegrityStatus` — a revoked certificate doesn't change whether the CMS
+  digest/signature cryptographically validates (`intact`/`signature_valid`
+  stay `True`), it's a separate trust concern, same reasoning as keeping
+  `trust_chain_status` apart from integrity.
+- **Plain-language integration**: a revoked certificate gets its own
+  leading clause in `plain_explanation` (`"The certificate used for this
+  signature has been revoked and cannot be relied on."`), ahead of the
+  modified-after-signing check, with the revocation date/time in
+  `technical_detail`. `UNAVAILABLE` gets a quieter trailing note in the
+  intact-signature happy path (`"Its revocation status could not be
+  confirmed right now."`); `GOOD`/`NOT_CHECKED` stay silent in
+  plain-language (the technical-details drawer always shows the outcome
+  regardless).
+- **Two-tier CA/leaf test fixtures were required, not optional.** Day 1 and
+  Day 2's Trusted-List tests use self-signed leaf certs registered directly
+  as their own trust anchor — fine for TL matching, but PKIX revocation
+  checking never applies to a trust anchor itself (there's no issuer to
+  vouch for it), so a self-signed cert can never be tested as revoked.
+  `pdf_fixtures.py` gained `generate_ca()` /
+  `generate_ca_issued_signer(...)` (a real CA-issued, non-self-signed leaf
+  with CRLDP/AIA extensions) plus `build_crl()` / `build_ocsp_response()`
+  (real signed revocation artifacts via `cryptography`'s
+  `CertificateRevocationListBuilder` / `x509.ocsp.OCSPResponseBuilder`) to
+  make this testable at all.
+- **A real signed OCSP response needs its own qcStatements to be credited
+  as "qualified" by `QualificationAssessor`** — same subtlety hit with QTST
+  certs in the Trusted List work — but that's a `trust_chain_status`
+  concern, orthogonal to `revocation_status`; not relevant to revocation
+  correctness itself, just noted here since it surfaced again while
+  building these fixtures.
+- **Known simplification, stated plainly rather than silently shipped**:
+  revocation (and the underlying PKIX path validation) is checked as of
+  *now* (`ValidationContext`'s default `moment`), not as of signing time,
+  unlike `QualificationAssessor`'s point-in-time-correct Trusted List
+  check. Properly checking "was this valid and unrevoked at signing time"
+  requires a two-pass validation model (discover signing time, then
+  re-validate against that moment) that's out of scope for this task;
+  today, a cert that's naturally expired since an old-but-valid signing
+  would be evaluated against present-day validity/revocation data. Worth
+  revisiting alongside the overall verdict logic (`_overall_verdict()`),
+  which is the next remaining piece anyway.
+
 ## Key implementation decisions
 
 - **Conservative QUALIFIED policy**: `SignatureItem.level` is only
@@ -205,16 +285,22 @@ Status as of 2026-07-08, end of Day 2 (per BUILD_GUIDE.md).
   it yet. The API layer (Day 3+) needs to: call it once at startup (or
   decide to serve degraded until the first refresh completes), then run it
   on a 24h loop (e.g. a FastAPI lifespan background task).
+- **Revocation is checked as of verification time, not signing time** — see
+  the "known simplification" note above. Not incorrect for a currently-valid
+  cert, but not full point-in-time AdES semantics for old signatures either.
+- Re-verified `Demo document.pdf` with `check_revocation=True` against the
+  live EU LOTL: `revocation_status` correctly comes back `NOT_CHECKED`,
+  because `trust_chain_status` is `UNAVAILABLE` for this document (its
+  issuer, GlobalSign, doesn't resolve against the Trusted List data we have)
+  — no PKIX path is built, so there's nothing for revocation checking to
+  walk. Still haven't seen a real document exercise the `TRUSTED` +
+  `GOOD`/`REVOKED` paths end-to-end; only the `Demo document.pdf` open item
+  above would give us that.
 
 ## Next: Day 2, remainder per BUILD_GUIDE.md
 
-1. **Revocation checking**: OCSP/CRL via pyHanko's validation context, hard
-   5s timeout per endpoint; timeout/unreachable → "revocation status
-   unavailable" rather than a failed verdict. The `ValidationContext` built
-   in `verify_pdf` currently sets `allow_fetching=False` deliberately to
-   keep revocation out of this module's scope — this is where that changes.
-2. **Overall verdict logic**: combine `level` + `trust_chain_status` (+
-   revocation) into the final trusted / partial / not-trusted /
+1. **Overall verdict logic**: combine `level` + `trust_chain_status` +
+   `revocation_status` into the final trusted / partial / not-trusted /
    no-signatures verdict per PRD section 6, with uncertainty (degraded TL,
    unavailable revocation) lowering confidence honestly rather than
    guessing. `_overall_verdict()` in `verify.py` is currently a placeholder

@@ -6,6 +6,7 @@ from .errors import (
 )
 from .models import (
     IntegrityStatus,
+    RevocationStatus,
     SignatureItem,
     SignatureLevel,
     SignatureType,
@@ -14,6 +15,7 @@ from .models import (
     VerificationResult,
     VerificationVerdict,
 )
+from .revocation import RevocationFetchers
 from .trust_list import TrustListCache, TrustListSnapshot
 from .verify import verify_pdf
 
@@ -23,6 +25,8 @@ __all__ = [
     'IncorrectPasswordError',
     'PasswordRequiredError',
     'IntegrityStatus',
+    'RevocationFetchers',
+    'RevocationStatus',
     'SignatureItem',
     'SignatureLevel',
     'SignatureType',

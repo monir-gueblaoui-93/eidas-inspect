@@ -23,6 +23,7 @@ from pyhanko_certvalidator.path import ValidationPath
 from .errors import CorruptedPdfError, IncorrectPasswordError, PasswordRequiredError
 from .models import (
     IntegrityStatus,
+    RevocationStatus,
     SignatureItem,
     SignatureLevel,
     SignatureType,
@@ -32,6 +33,7 @@ from .models import (
     VerificationVerdict,
 )
 from .qc_statements import QcStatements, extract_qc_statements
+from .revocation import RevocationFetchers, TrackedCRLFetcher, TrackedOCSPFetcher, build_fetchers
 from .trust_list import TrustListSnapshot
 
 
@@ -39,6 +41,8 @@ def verify_pdf(
     data: bytes,
     password: str | None = None,
     trust_list: TrustListSnapshot | None = None,
+    check_revocation: bool = False,
+    revocation_fetchers: RevocationFetchers | None = None,
 ) -> VerificationResult:
     document_sha256 = hashlib.sha256(data).hexdigest()
     verified_at = datetime.now(timezone.utc)
@@ -54,16 +58,13 @@ def verify_pdf(
             verified_at=verified_at,
         )
 
-    validation_context = (
-        ValidationContext(
-            trust_manager=TSPTrustManager(trust_list.registry),
-            allow_fetching=False,
-        )
-        if trust_list is not None
-        else None
+    validation_context, crl_fetcher, ocsp_fetcher = _build_validation_context(
+        trust_list, check_revocation, revocation_fetchers
     )
     items = [
-        _build_signature_item(sig, trust_list, validation_context, verified_at)
+        _build_signature_item(
+            sig, trust_list, validation_context, crl_fetcher, ocsp_fetcher, verified_at
+        )
         for sig in embedded_sigs
     ]
     return VerificationResult(
@@ -72,6 +73,40 @@ def verify_pdf(
         document_sha256=document_sha256,
         verified_at=verified_at,
     )
+
+
+def _build_validation_context(
+    trust_list: TrustListSnapshot | None,
+    check_revocation: bool,
+    revocation_fetchers: RevocationFetchers | None,
+) -> tuple[ValidationContext | None, TrackedCRLFetcher | None, TrackedOCSPFetcher | None]:
+    """Build the (optional) shared validation context for this verification
+    call.
+
+    Revocation checking is only meaningful alongside a Trusted List snapshot
+    (there would be no trust anchor to build a path against otherwise), so
+    ``check_revocation`` is a no-op unless ``trust_list`` is also supplied.
+    Without it, this preserves the exact pre-revocation behavior: no
+    fetching, no network calls, ``trust_chain_status`` stays whatever the
+    Trusted List wiring alone produces.
+    """
+    if trust_list is None:
+        return None, None, None
+
+    crl_fetcher = ocsp_fetcher = None
+    fetchers = None
+    if check_revocation:
+        fetchers, crl_fetcher, ocsp_fetcher = build_fetchers(
+            revocation_fetchers or RevocationFetchers()
+        )
+
+    validation_context = ValidationContext(
+        trust_manager=TSPTrustManager(trust_list.registry),
+        allow_fetching=check_revocation,
+        fetchers=fetchers,
+        revocation_mode='soft-fail',
+    )
+    return validation_context, crl_fetcher, ocsp_fetcher
 
 
 def _open_reader(data: bytes, password: str | None) -> PdfFileReader:
@@ -99,6 +134,8 @@ def _build_signature_item(
     embedded_sig: EmbeddedPdfSignature,
     trust_list: TrustListSnapshot | None,
     validation_context: ValidationContext | None,
+    crl_fetcher: TrackedCRLFetcher | None,
+    ocsp_fetcher: TrackedOCSPFetcher | None,
     verified_at: datetime,
 ) -> SignatureItem:
     is_timestamp = embedded_sig.sig_object_type == '/DocTimeStamp'
@@ -169,6 +206,13 @@ def _build_signature_item(
             if ts_trust_status is TrustChainStatus.TRUSTED:
                 timestamp_quality = TimestampQuality.QUALIFIED_TSA
 
+    revocation_status, revocation_note = _assess_revocation(
+        status.signing_cert,
+        status.revocation_details,
+        crl_fetcher,
+        ocsp_fetcher,
+    )
+
     plain, technical = _explanations(
         sig_type,
         integrity,
@@ -178,6 +222,8 @@ def _build_signature_item(
         trust_chain_status,
         trust_note,
         timestamp_quality,
+        revocation_status,
+        revocation_note,
     )
 
     return SignatureItem(
@@ -191,6 +237,50 @@ def _build_signature_item(
         signing_time=signing_time,
         timestamp_quality=timestamp_quality,
         trust_chain_status=trust_chain_status,
+        revocation_status=revocation_status,
+    )
+
+
+def _assess_revocation(
+    cert: x509.Certificate,
+    revocation_details,
+    crl_fetcher: TrackedCRLFetcher | None,
+    ocsp_fetcher: TrackedOCSPFetcher | None,
+) -> tuple[RevocationStatus, str | None]:
+    """Map pyHanko's ``revocation_details`` (if any) plus our own
+    fetch-outcome tracking onto :class:`RevocationStatus`.
+
+    pyhanko_certvalidator's soft-fail mode leaves ``revocation_details`` at
+    ``None`` both when the certificate is genuinely fine *and* when the
+    check couldn't be performed at all (unreachable/timed-out endpoint) --
+    outcome tracking on our own fetchers (see :mod:`.revocation`) is what
+    lets those two cases be told apart honestly, instead of reporting a
+    clean bill of health when the check never actually happened.
+    """
+    if crl_fetcher is None and ocsp_fetcher is None:
+        return RevocationStatus.NOT_CHECKED, None
+
+    if revocation_details is not None:
+        revoked_at = revocation_details.revocation_date
+        return RevocationStatus.REVOKED, (
+            f'This certificate was revoked on {revoked_at:%Y-%m-%d} at '
+            f'{revoked_at:%H:%M} UTC.'
+        )
+
+    crl_outcome = crl_fetcher.outcome_for(cert) if crl_fetcher else None
+    ocsp_outcome = ocsp_fetcher.outcome_for(cert) if ocsp_fetcher else None
+    attempted = (crl_outcome and crl_outcome.attempted) or (
+        ocsp_outcome and ocsp_outcome.attempted
+    )
+    succeeded = (crl_outcome and crl_outcome.ok) or (ocsp_outcome and ocsp_outcome.ok)
+
+    if not attempted:
+        return RevocationStatus.NOT_CHECKED, None
+    if succeeded:
+        return RevocationStatus.GOOD, 'No revocation was found via OCSP/CRL check.'
+    return RevocationStatus.UNAVAILABLE, (
+        'Revocation status could not be confirmed: the OCSP/CRL endpoint(s) '
+        'for this certificate were unreachable or timed out.'
     )
 
 
@@ -373,16 +463,29 @@ def _explanations(
     trust_chain_status: TrustChainStatus,
     trust_note: str | None,
     timestamp_quality: TimestampQuality,
+    revocation_status: RevocationStatus,
+    revocation_note: str | None,
 ) -> tuple[str, str]:
     noun = _noun_for(sig_type)
     qc_suffix = f' {qc_note}' if qc_note else ''
     trust_suffix = f' {trust_note}' if trust_note else ''
+    revocation_suffix = f' {revocation_note}' if revocation_note else ''
 
     if not integrity.intact or not integrity.signature_valid:
         return (
             f"This {noun} is broken and cannot be relied on.",
             'Digest/signature verification failed: '
             f'intact={integrity.intact}, valid={integrity.signature_valid}.'
+            + qc_suffix
+            + trust_suffix
+            + revocation_suffix,
+        )
+
+    if revocation_status is RevocationStatus.REVOKED:
+        return (
+            f"The certificate used for this {noun} has been revoked and "
+            "cannot be relied on.",
+            (revocation_note or 'The certificate was revoked.')
             + qc_suffix
             + trust_suffix,
         )
@@ -393,7 +496,8 @@ def _explanations(
             'Incremental update analysis found changes beyond what is '
             f'permitted after signing (coverage={coverage_name}).'
             + qc_suffix
-            + trust_suffix,
+            + trust_suffix
+            + revocation_suffix,
         )
 
     if integrity.lta_extended:
@@ -415,8 +519,13 @@ def _explanations(
         if sig_type is not SignatureType.TIMESTAMP
         else ''
     )
-    plain += _qualification_clause(level, trust_chain_status, noun) + timestamp_clause
-    technical += qc_suffix + trust_suffix
+    revocation_clause = _revocation_clause(revocation_status)
+    plain += (
+        _qualification_clause(level, trust_chain_status, noun)
+        + timestamp_clause
+        + revocation_clause
+    )
+    technical += qc_suffix + trust_suffix + revocation_suffix
     return plain, technical
 
 
@@ -463,6 +572,12 @@ def _timestamp_quality_clause(timestamp_quality: TimestampQuality) -> str:
             " No verifiable timestamp is present; the signing time shown is "
             "the signer's own claim."
         )
+    return ''
+
+
+def _revocation_clause(revocation_status: RevocationStatus) -> str:
+    if revocation_status is RevocationStatus.UNAVAILABLE:
+        return " Its revocation status could not be confirmed right now."
     return ''
 
 
