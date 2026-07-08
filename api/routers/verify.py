@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, File, Form, Request, UploadFile
 from starlette.concurrency import run_in_threadpool
 
@@ -6,6 +8,8 @@ from ..config import settings
 from ..rate_limit import limiter
 from ..services import counters
 from ..services.verification import verify_upload
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -23,6 +27,16 @@ async def verify(
     revocation_fetchers = request.app.state.revocation_fetchers
     result = await verify_upload(data, password, trust_list_cache, revocation_fetchers)
 
-    await run_in_threadpool(counters.record_verdict, result.verdict.value)
+    try:
+        await run_in_threadpool(
+            counters.record_verdict,
+            result.verdict.value,
+            db_path=request.app.state.counters_db_path,
+        )
+    except Exception:
+        # Anonymous counters are a nice-to-have -- a full disk, a lost
+        # volume mount, whatever -- must never fail a verification that
+        # otherwise succeeded.
+        logger.warning('Failed to record verification counter.', exc_info=True)
 
     return schemas.to_response(result)

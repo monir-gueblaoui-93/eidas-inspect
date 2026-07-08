@@ -29,6 +29,7 @@ next — read it first at the start of a new session before making changes.
 ## Commands
 - `pytest core/tests` — run core tests
 - `pytest api/tests` — run API tests (offline, reuses core's test fixtures)
-- `pip install -e core/ -r api/requirements.txt` — set up the venv for both
+- `pip install -e core/ -r api/requirements-dev.txt` — set up the venv for both
+  (adds test-only deps; the production image installs `api/requirements.txt` only)
 - `uvicorn api.main:app --reload` — run API locally
 - `cd web && npm run dev` — run frontend locally

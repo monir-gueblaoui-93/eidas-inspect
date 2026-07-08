@@ -1,0 +1,32 @@
+# Real documents -- must never enter the image, let alone a layer.
+qes_document.pdf
+Demo document.pdf
+*.pdf
+
+# Python
+.venv/
+**/__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# Node
+web/node_modules/
+web/dist/
+
+# Tests and fixtures (never shipped; the Dockerfile only COPYs the
+# eidas_inspect_core package and api/, not core/tests or api/tests)
+core/tests/
+api/tests/
+api/data/
+
+# VCS / editor / OS cruft
+.git/
+.github/
+.gitignore
+.dockerignore
+.DS_Store
+.claude/
+
+# Docs (not needed at runtime)
+*.md

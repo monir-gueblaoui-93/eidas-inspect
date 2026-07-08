@@ -26,6 +26,7 @@ from .logging_config import configure_logging
 from .middleware import MaxBodySizeMiddleware
 from .rate_limit import limiter, rate_limit_exceeded_handler
 from .routers import health, report, verify
+from .startup import resolve_counters_db_path
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,7 @@ def create_app(
         # refresh completes, rather than blocking startup on a network call.
         app.state.trust_list_cache = cache
         app.state.revocation_fetchers = revocation_fetchers
+        app.state.counters_db_path = resolve_counters_db_path(settings.counters_db_path)
         refresh_task = (
             asyncio.create_task(_trust_list_refresh_loop(cache))
             if start_background_refresh

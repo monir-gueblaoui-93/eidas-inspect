@@ -1,0 +1,5 @@
+# Test-only, on top of the production requirements. Never installed in
+# the production Docker image (see the root Dockerfile).
+-r requirements.txt
+httpx>=0.27
+pytest>=8.0.0

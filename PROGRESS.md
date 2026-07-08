@@ -675,21 +675,109 @@ small and the visual language consistent.
   reset the in-memory counter before handing off for manual browser
   testing, to avoid accidentally locking out that first real test.
 
-## Next: Day 6 -- deploy
+## Done (Day 6): production build and Railway deployment
 
-1. **First, a real browser pass** (this environment couldn't do one): run
-   the full flow on desktop and a phone-sized viewport, including the
-   qes_document.pdf TRUSTED path (not yet seen rendered), Demo
-   document.pdf's PARTIAL path, unsigned/wrong-password/rate-limit edge
-   states, and the report download.
-2. Wire the built frontend into `api/static/` (currently a placeholder
-   `index.html`) so the FastAPI app serves it from the same origin/port
-   in production.
-3. Root Dockerfile building both `core`+`api` (Python) and the built
-   frontend (Node) into one image, per BUILD_GUIDE.md Day 6 -- not
-   started. Deploy to Railway or Render per BUILD_GUIDE.md.
-4. Day 7 polish: README demo GIF, a small real-world test-document set
-   beyond the two documents used so far.
+Root `Dockerfile`, `.dockerignore`, `railway.json`, and `DEPLOY.md` added.
+No container runtime existed on this machine at all (no Docker, Podman, or
+Colima) -- installed Colima + the Docker CLI via Homebrew specifically to
+build and run the image for real rather than reviewing the Dockerfile
+statically and hoping. Everything below was verified against an actual
+running container, not just inspected.
+
+- **Multi-stage Dockerfile**: stage 1 (`node:22-slim`) runs `npm ci` +
+  `npm run build` for the frontend; stage 2 (`python:3.12-slim`) installs
+  `core/` and `api/`'s *production-only* requirements, copies the app
+  code, and copies stage 1's `dist/` straight into `api/static/` --
+  exactly the directory FastAPI already serves as static files, so no new
+  serving logic was needed. Final image: **~89 MB** of actual content.
+- **Split `api/requirements.txt`**: the old file mixed prod and test-only
+  deps (`httpx`, `pytest`) with a comment marking which was which --
+  formalized that into `api/requirements-dev.txt` (`-r requirements.txt`
+  plus the test deps). The Dockerfile installs only the prod file;
+  confirmed by shelling into the built image and checking that `import
+  pytest` / `import httpx` both fail. `CLAUDE.md`'s setup command updated
+  to point at `requirements-dev.txt` for local dev.
+- **`.dockerignore`** excludes `.venv/`, `web/node_modules/`, `web/dist/`,
+  `.git/`, `core/tests/`, `api/tests/`, `api/data/`, and -- explicitly,
+  redundantly, on purpose given what's at stake -- `qes_document.pdf`,
+  `Demo document.pdf`, and a blanket `*.pdf`. Confirmed by shelling into
+  the built image and running `find / -iname '*.pdf'`: zero results.
+- **Counters DB path**: default changed from a path inside the repo to
+  `/data/counters.db` (a Railway volume mount target), with a new
+  `api/startup.resolve_counters_db_path()` that probes writability at
+  startup and falls back to `/tmp/eidas-inspect-counters.db` with a
+  logged warning if the configured path can't be created/written --
+  wired into `create_app()`'s lifespan and threaded through to the
+  `/api/verify` route via `app.state.counters_db_path`. The route call
+  is additionally wrapped in `try`/`except` (defense in depth on top of
+  the startup check): a full disk or a race between the startup probe
+  and an actual write can never fail a verification that otherwise
+  succeeded. Verified three ways: locally on macOS (`/data` is
+  unwritable there, triggering the real fallback path and warning log);
+  in a plain `docker run` with no volume (root fs is writable by
+  default, so `/data/counters.db` is used directly -- ephemeral but
+  harmless, exactly the "works without a volume, just doesn't persist"
+  behavior `DEPLOY.md` documents); and in a `docker run --tmpfs
+  /data:ro` container simulating a genuinely unwritable mount, which
+  correctly logged the fallback warning and still returned `200` on
+  `/api/verify`.
+- **`/api/health` now reports Trusted List freshness**:
+  `{"status": "ok", "trust_list": {"status": "fresh"|"stale"|"refreshing",
+  "refreshed_at": "..."}}`. Reuses `TrustListSnapshot.is_degraded()` --
+  the same definition already governing per-verification
+  `trust_chain_status=UNAVAILABLE` -- rather than inventing a second
+  notion of freshness. `refreshed_at is None` (no refresh has completed
+  yet) reads as `"refreshing"`. Tests added for all three states.
+  **Real-world note surfaced during testing**: this reads `"stale"` quite
+  often in practice, because *any* single EU member state's trusted-list
+  fetch failing this cycle marks the whole snapshot degraded -- confirmed
+  live both locally and inside the container (EE/IE/CZ/IT entries
+  routinely fail with 403s, TLS issues, or unparseable extensions). This
+  is documented in `DEPLOY.md` as expected, not a sign of breakage.
+- **`--forwarded-allow-ips='*'`** added to the production uvicorn command.
+  Without it, uvicorn's proxy-header trust (on by default) only trusts
+  `X-Forwarded-For` from `127.0.0.1` -- behind Railway's proxy, every
+  request would otherwise appear to originate from the same internal
+  proxy IP, putting every real user in the *same* rate-limit bucket. Not
+  explicitly requested, but a real correctness bug for a per-IP rate
+  limiter running behind any reverse proxy, so fixed as part of the
+  production hardening pass.
+- **Logs to stdout explicitly** (`logging.basicConfig`'s default is
+  stderr) -- Railway and most container platforms treat stdout as the
+  primary stream. Grepped every `logger.*`/`logging.*` call site across
+  `api/` and `core/` (four total) to re-confirm none logs a filename,
+  password, or document content -- all four are either sanitized
+  Trusted-List-fetch diagnostics or the new counters-fallback warning,
+  none of which can contain user data.
+- **CORS**: confirmed no `CORSMiddleware` exists anywhere in `api/` --
+  correct and intentional, since the built frontend is served from the
+  same FastAPI app/origin in production. Nothing to add.
+- **`railway.json`**: pins the Dockerfile builder explicitly and points
+  Railway's healthcheck at `/api/health` (30s timeout, restart-on-failure
+  up to 3 retries).
+- **Full local container verification** (all against the actual running
+  image, via `docker run` + `curl`, not just code review): frontend HTML
+  served from `/`; `Demo document.pdf` → `partial` end-to-end;
+  `qes_document.pdf` → still `trusted` with `revocation_source: embedded`
+  inside the container; unsigned PDF → `no-signatures`; not-a-PDF →
+  `not_a_pdf` error envelope; `/api/report` round-tripped a real,
+  parseable PDF. Full `pytest core/tests api/tests` (68/68) re-run and
+  green after every code change in this phase.
+
+**Not done by this work**: nothing was actually deployed to Railway --
+per instructions, only local verification was performed. `DEPLOY.md` has
+the exact one-time setup steps (new project from GitHub, volume at
+`/data`, generate domain) and the ongoing deploy flow (`git push` =
+redeploy) for the user to click through themselves.
+
+## Next: Day 7 -- polish, then the real Railway deploy
+
+1. Click through `DEPLOY.md`'s one-time Railway setup, confirm the
+   production smoke test (real signed PDF, unsigned PDF, report download,
+   all from a phone) against the live `*.up.railway.app` URL.
+2. README demo GIF; a small real-world test-document set beyond the two
+   documents used so far (BankID-signed, D-Trust-sealed, a genuinely
+   broken-seal fixture), per the PRD's own recommended open item.
 
 Also still open from earlier days:
 - The Subject-`C=` territory-attribution heuristic remains deliberately
