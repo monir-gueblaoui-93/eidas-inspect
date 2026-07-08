@@ -73,6 +73,20 @@ def generate_self_signed_signer(
         .serial_number(cx509.random_serial_number())
         .not_valid_before(now - timedelta(days=1))
         .not_valid_after(now + timedelta(days=365))
+        .add_extension(
+            cx509.KeyUsage(
+                digital_signature=True,
+                content_commitment=True,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
     )
     if qc_compliance or qc_sscd or qc_type_oid is not None:
         der = _build_qc_statements_der(

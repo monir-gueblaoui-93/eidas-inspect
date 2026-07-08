@@ -14,7 +14,11 @@ from pyhanko.sign.validation.pdf_embedded import (
     async_validate_pdf_timestamp,
     collect_embedded_signatures,
 )
+from pyhanko.sign.validation.qualified.assess import QualificationAssessor
+from pyhanko.sign.validation.qualified.tsp import TSPTrustManager
 from pyhanko.sign.validation.status import SignatureCoverageLevel
+from pyhanko_certvalidator import ValidationContext
+from pyhanko_certvalidator.path import ValidationPath
 
 from .errors import CorruptedPdfError, IncorrectPasswordError, PasswordRequiredError
 from .models import (
@@ -23,13 +27,19 @@ from .models import (
     SignatureLevel,
     SignatureType,
     TimestampQuality,
+    TrustChainStatus,
     VerificationResult,
     VerificationVerdict,
 )
 from .qc_statements import QcStatements, extract_qc_statements
+from .trust_list import TrustListSnapshot
 
 
-def verify_pdf(data: bytes, password: str | None = None) -> VerificationResult:
+def verify_pdf(
+    data: bytes,
+    password: str | None = None,
+    trust_list: TrustListSnapshot | None = None,
+) -> VerificationResult:
     document_sha256 = hashlib.sha256(data).hexdigest()
     verified_at = datetime.now(timezone.utc)
 
@@ -44,7 +54,18 @@ def verify_pdf(data: bytes, password: str | None = None) -> VerificationResult:
             verified_at=verified_at,
         )
 
-    items = [_build_signature_item(sig) for sig in embedded_sigs]
+    validation_context = (
+        ValidationContext(
+            trust_manager=TSPTrustManager(trust_list.registry),
+            allow_fetching=False,
+        )
+        if trust_list is not None
+        else None
+    )
+    items = [
+        _build_signature_item(sig, trust_list, validation_context, verified_at)
+        for sig in embedded_sigs
+    ]
     return VerificationResult(
         verdict=_overall_verdict(items),
         items=items,
@@ -74,7 +95,12 @@ def _open_reader(data: bytes, password: str | None) -> PdfFileReader:
     return reader
 
 
-def _build_signature_item(embedded_sig: EmbeddedPdfSignature) -> SignatureItem:
+def _build_signature_item(
+    embedded_sig: EmbeddedPdfSignature,
+    trust_list: TrustListSnapshot | None,
+    validation_context: ValidationContext | None,
+    verified_at: datetime,
+) -> SignatureItem:
     is_timestamp = embedded_sig.sig_object_type == '/DocTimeStamp'
     provisional_type = (
         SignatureType.TIMESTAMP if is_timestamp else SignatureType.SIGNATURE
@@ -82,9 +108,15 @@ def _build_signature_item(embedded_sig: EmbeddedPdfSignature) -> SignatureItem:
 
     try:
         if is_timestamp:
-            status = asyncio.run(async_validate_pdf_timestamp(embedded_sig))
+            status = asyncio.run(
+                async_validate_pdf_timestamp(embedded_sig, validation_context)
+            )
         else:
-            status = asyncio.run(async_validate_pdf_signature(embedded_sig))
+            status = asyncio.run(
+                async_validate_pdf_signature(
+                    embedded_sig, signer_validation_context=validation_context
+                )
+            )
     except Exception as e:
         return _unreadable_signature_item(provisional_type, e)
 
@@ -105,13 +137,48 @@ def _build_signature_item(embedded_sig: EmbeddedPdfSignature) -> SignatureItem:
     coverage_name = status.coverage.name if status.coverage is not None else 'UNKNOWN'
     signing_time, timestamp_quality = _signing_time_info(is_timestamp, status)
 
+    # Only use signing_time as the qualification "moment" when it comes from
+    # a verified timestamp, not a bare self-reported claim -- otherwise a
+    # forged /M value could be used to pick a moment when a since-withdrawn
+    # CA was still granted.
+    qualification_moment = (
+        signing_time
+        if signing_time is not None
+        and timestamp_quality is not TimestampQuality.CLAIMED_ONLY
+        else verified_at
+    )
+    trust_chain_status, trust_note = _assess_trust_chain(
+        status.validation_path, qualification_moment, trust_list, verified_at
+    )
+
     if is_timestamp:
         sig_type, level, qc_note = SignatureType.TIMESTAMP, SignatureLevel.UNKNOWN, None
+        if trust_chain_status is TrustChainStatus.TRUSTED:
+            timestamp_quality = TimestampQuality.QUALIFIED_TSA
     else:
         qc = extract_qc_statements(status.signing_cert)
         sig_type, level, qc_note = _classify_certificate(qc, integrity)
+        embedded_timestamp = status.timestamp_validity
+        if embedded_timestamp is not None:
+            ts_trust_status, _ = _assess_trust_chain(
+                embedded_timestamp.validation_path,
+                embedded_timestamp.timestamp,
+                trust_list,
+                verified_at,
+            )
+            if ts_trust_status is TrustChainStatus.TRUSTED:
+                timestamp_quality = TimestampQuality.QUALIFIED_TSA
 
-    plain, technical = _explanations(sig_type, integrity, coverage_name, level, qc_note)
+    plain, technical = _explanations(
+        sig_type,
+        integrity,
+        coverage_name,
+        level,
+        qc_note,
+        trust_chain_status,
+        trust_note,
+        timestamp_quality,
+    )
 
     return SignatureItem(
         type=sig_type,
@@ -123,6 +190,61 @@ def _build_signature_item(embedded_sig: EmbeddedPdfSignature) -> SignatureItem:
         issuing_tsp=_friendly_name(status.signing_cert.issuer, 'organization_name'),
         signing_time=signing_time,
         timestamp_quality=timestamp_quality,
+        trust_chain_status=trust_chain_status,
+    )
+
+
+def _assess_trust_chain(
+    validation_path: ValidationPath | None,
+    moment: datetime,
+    trust_list: TrustListSnapshot | None,
+    verified_at: datetime,
+) -> tuple[TrustChainStatus, str | None]:
+    """Map a PKIX path built against the Trusted List's trust anchors onto
+    our trust-chain model.
+
+    ``validation_path`` is only non-``None`` if path-building actually found
+    the issuing authority among the registered CA/QC or QTST services in the
+    first place (see :class:`~.trust_list.registry.TrustListSnapshot` and
+    ``TSPTrustManager``), so "no path" means "not found on the list". That's
+    only reported as a confident :attr:`TrustChainStatus.UNTRUSTED` when the
+    Trusted List data itself is fresh -- if any list failed to refresh or the
+    snapshot has gone stale, we might simply be missing the data that would
+    have vindicated the issuer, so we report
+    :attr:`TrustChainStatus.UNAVAILABLE` instead of guessing in either
+    direction.
+    """
+    if trust_list is None:
+        return TrustChainStatus.UNKNOWN, None
+
+    if validation_path is None:
+        if trust_list.is_degraded(verified_at):
+            return TrustChainStatus.UNAVAILABLE, (
+                'Trusted List data is unavailable or out of date, so the '
+                'issuing certificate authority could not be checked right '
+                'now.'
+            )
+        return TrustChainStatus.UNTRUSTED, (
+            'The issuing certificate authority was not found as a granted '
+            'service on the EU Trusted List.'
+        )
+
+    result = QualificationAssessor(trust_list.registry).check_entity_cert_qualified(
+        validation_path, moment=moment
+    )
+    if result.status.qualified:
+        service_name = (
+            result.service_definition.base_info.service_name
+            if result.service_definition
+            else 'a granted service'
+        )
+        return TrustChainStatus.TRUSTED, (
+            f"Matched '{service_name}' as a granted qualified service on "
+            'the EU Trusted List.'
+        )
+    return TrustChainStatus.UNTRUSTED, (
+        'The issuing certificate authority is on the EU Trusted List but '
+        'was not granted qualified status at the relevant time.'
     )
 
 
@@ -162,9 +284,7 @@ def _classify_certificate(
         return (
             sig_type,
             SignatureLevel.QUALIFIED,
-            f'Certificate asserts QcCompliance, QcSSCD, and QcType={qc_type_name}; '
-            'the issuing provider has not yet been verified against the EU '
-            'Trusted List.',
+            f'Certificate asserts QcCompliance, QcSSCD, and QcType={qc_type_name}.',
         )
 
     if not qc.qc_compliance and not qc.qc_sscd and not qc.qc_types:
@@ -250,23 +370,30 @@ def _explanations(
     coverage_name: str,
     level: SignatureLevel,
     qc_note: str | None,
+    trust_chain_status: TrustChainStatus,
+    trust_note: str | None,
+    timestamp_quality: TimestampQuality,
 ) -> tuple[str, str]:
     noun = _noun_for(sig_type)
     qc_suffix = f' {qc_note}' if qc_note else ''
+    trust_suffix = f' {trust_note}' if trust_note else ''
 
     if not integrity.intact or not integrity.signature_valid:
         return (
             f"This {noun} is broken and cannot be relied on.",
             'Digest/signature verification failed: '
             f'intact={integrity.intact}, valid={integrity.signature_valid}.'
-            + qc_suffix,
+            + qc_suffix
+            + trust_suffix,
         )
 
     if integrity.modified_after_signing:
         return (
             f"The document was changed after this {noun} was applied.",
             'Incremental update analysis found changes beyond what is '
-            f'permitted after signing (coverage={coverage_name}).' + qc_suffix,
+            f'permitted after signing (coverage={coverage_name}).'
+            + qc_suffix
+            + trust_suffix,
         )
 
     if integrity.lta_extended:
@@ -283,11 +410,38 @@ def _explanations(
         plain = f"This {noun} is intact and has not been tampered with."
         technical = 'Digest and cryptographic signature verification succeeded.'
 
-    return plain + _qualification_clause(level, noun), technical + qc_suffix
+    timestamp_clause = (
+        _timestamp_quality_clause(timestamp_quality)
+        if sig_type is not SignatureType.TIMESTAMP
+        else ''
+    )
+    plain += _qualification_clause(level, trust_chain_status, noun) + timestamp_clause
+    technical += qc_suffix + trust_suffix
+    return plain, technical
 
 
-def _qualification_clause(level: SignatureLevel, noun: str) -> str:
+def _qualification_clause(
+    level: SignatureLevel, trust_chain_status: TrustChainStatus, noun: str
+) -> str:
     if level is SignatureLevel.QUALIFIED:
+        if trust_chain_status is TrustChainStatus.TRUSTED:
+            return (
+                f" The certificate declares this a qualified {noun}, and the "
+                "issuing provider is confirmed on the EU Trusted List."
+            )
+        if trust_chain_status is TrustChainStatus.UNTRUSTED:
+            return (
+                f" The certificate declares this a qualified {noun}, but the "
+                "issuing provider was not found as a granted qualified "
+                "service on the EU Trusted List, so qualified status is not "
+                "confirmed."
+            )
+        if trust_chain_status is TrustChainStatus.UNAVAILABLE:
+            return (
+                f" The certificate declares this a qualified {noun}; the "
+                "issuing provider's status could not be confirmed against "
+                "the EU Trusted List right now."
+            )
         return (
             f" The certificate declares this a qualified {noun}; the "
             "issuing provider has not yet been checked against the EU "
@@ -297,6 +451,17 @@ def _qualification_clause(level: SignatureLevel, noun: str) -> str:
         return (
             f" This is an advanced {noun}; the certificate does not clearly "
             "declare qualified status."
+        )
+    return ''
+
+
+def _timestamp_quality_clause(timestamp_quality: TimestampQuality) -> str:
+    if timestamp_quality is TimestampQuality.QUALIFIED_TSA:
+        return " The signing time is backed by a qualified timestamp."
+    if timestamp_quality is TimestampQuality.CLAIMED_ONLY:
+        return (
+            " No verifiable timestamp is present; the signing time shown is "
+            "the signer's own claim."
         )
     return ''
 

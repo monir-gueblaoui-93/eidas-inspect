@@ -26,6 +26,10 @@ class SignatureLevel(StrEnum):
 class TrustChainStatus(StrEnum):
     TRUSTED = 'trusted'
     UNTRUSTED = 'untrusted'
+    UNAVAILABLE = 'unavailable'
+    """Checked against the EU Trusted List, but no confident answer could be
+    reached right now (the list data is unreachable or stale). Distinct from
+    :attr:`UNKNOWN`, which means "not checked at all"."""
     UNKNOWN = 'unknown'
 
 

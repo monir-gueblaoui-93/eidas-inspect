@@ -1,8 +1,8 @@
 # Progress
 
-Status as of 2026-07-07, end of Day 1 (per BUILD_GUIDE.md).
+Status as of 2026-07-08, end of Day 2 (per BUILD_GUIDE.md).
 
-## Done
+## Done (Day 1)
 
 - **`core/` package (`eidas_inspect_core`)**: pure-Python validation core,
   zero web deps, `pyproject.toml` + editable install into a project `.venv`
@@ -22,14 +22,131 @@ Status as of 2026-07-07, end of Day 1 (per BUILD_GUIDE.md).
   QcType from the signer certificate. `SignatureItem.type` distinguishes
   esign (signature) from eseal (seal); `SignatureItem.level` is
   QUALIFIED / ADVANCED / BASIC.
-- **Tests**: 12/12 passing (`pytest core/tests`), covering unsigned,
-  signed-without-qcStatements, clean QES, clean QSeal, sloppy/ambiguous
-  cert, genuine tampering, LTA extension, corrupted PDF, and all three
-  password-protection paths. Fixtures are generated in-memory with
-  self-signed certs via pyHanko's own signing/timestamping/ASN.1 APIs — no
-  fixture files committed to the repo.
+- **Tests**: 12/12 passing, covering unsigned, signed-without-qcStatements,
+  clean QES, clean QSeal, sloppy/ambiguous cert, genuine tampering, LTA
+  extension, corrupted PDF, and all three password-protection paths.
+  Fixtures are generated in-memory with self-signed certs via pyHanko's own
+  signing/timestamping/ASN.1 APIs — no fixture files committed to the repo.
 - Verified against one real signed PDF (`Demo document.pdf`, gitignored,
   not committed) — see open item below.
+
+## Done (Day 2): EU Trusted List engine
+
+- **Key discovery — reuse, don't reinvent**: pyHanko 0.35.2 (behind the
+  `etsi` and `async-http` extras) already ships a complete ETSI TS 119 612
+  engine at `pyhanko.sign.validation.qualified`: LOTL/TL fetching
+  (`eutl_fetch`), full XML parsing plus XAdES signature verification of the
+  LOTL and every trusted list against bundled EU-published bootstrap certs
+  with pivot-following (`eutl_parse`), a `TSPRegistry`/`TSPTrustManager`
+  that plugs straight into `pyhanko_certvalidator.ValidationContext`
+  (`tsp.py`), and the full ETSI TS 119 612 §5.5.9 qualifier-combination
+  algorithm (`QualificationAssessor`, `assess.py`) — the exact same
+  algorithm pyHanko's own internal AdES validation flow uses
+  (`ades.py::_qualification_analysis` is a one-line call to
+  `QualificationAssessor.check_entity_cert_qualified`). Day 2 therefore adds
+  a thin caching/staleness/degraded-mode layer plus the glue to
+  `verify.py`, not a from-scratch TL parser or XML-dsig implementation.
+  `core/pyproject.toml` now depends on `pyhanko[etsi,async-http]>=0.35.2`.
+- **`eidas_inspect_core/trust_list/` package**:
+  - `registry.py`: `build_snapshot(lotl_xml, fetch, only_territories=None)`
+    parses the LOTL once (`eutl_parse.validate_and_parse_lotl`), then fetches
+    and verifies each referenced member-state list independently
+    (`eutl_parse.trust_list_to_registry`) via an injectable async `fetch`
+    callable. One state's failure (bad XML, wrong signing cert, timeout) is
+    recorded against that state only in `territory_status` and never aborts
+    the others. Returns an immutable `TrustListSnapshot`
+    (registry + `lotl_status` + `territory_status` + `refreshed_at`) with an
+    `is_degraded(moment)` predicate: true if the LOTL itself failed, the
+    snapshot is older than `STALE_AFTER` (48h — one missed 24h refresh cycle
+    shouldn't immediately look "unavailable"), or any territory failed this
+    cycle.
+  - `cache.py`: `TrustListCache` holds the current snapshot and exposes
+    `async def refresh()` as a **plain coroutine with no built-in
+    scheduling** — per design, the API layer owns the 24h refresh loop
+    (FastAPI lifespan task) and can trigger it manually later; core just
+    provides the primitive. If the LOTL fetch itself fails, the previous
+    good snapshot is kept rather than discarded (it reads as degraded via
+    staleness once old enough, but a transient outage doesn't erase
+    otherwise-good data).
+- **Matching**: identity is `(Subject DN, SubjectPublicKeyInfo)` —
+  `pyhanko_certvalidator.authority.AuthorityWithCert`'s own equality, not
+  something built for this project. This is more robust than SKI (often
+  absent) or subject-name-only matching (inconsistent encoding across
+  national PKI systems), and is exactly what PKIX path-building already
+  uses. `verify_pdf` builds one `ValidationContext(trust_manager=
+  TSPTrustManager(trust_list.registry), allow_fetching=False)` per call
+  (revocation checking deliberately excluded — that's Prompt 5) and passes
+  it as `signer_validation_context`/`ts_validation_context` into the
+  existing `async_validate_pdf_signature`/`async_validate_pdf_timestamp`
+  calls, unchanged otherwise. `status.validation_path` is `None` exactly
+  when the issuing authority isn't registered in the snapshot at all — this
+  works uniformly for CA/QC-issued signature certs (path walks up to a
+  registered CA) **and** QTST timestamp certs (the TSA's own leaf cert is
+  registered as its own trust anchor, a 0-length path) via the same
+  `TSPTrustManager`, confirmed empirically and by inspecting pyHanko's own
+  internal AdES code, which uses the identical mechanism for both.
+- **Degraded mode, simplified (per explicit product decision)**: no
+  cert-to-territory attribution heuristic. The rule is purely: found in the
+  registry → assess normally (`TRUSTED`/`UNTRUSTED` per
+  `QualificationAssessor`). Not found + all consulted lists fresh →
+  confident `UNTRUSTED`. Not found + the snapshot is degraded (LOTL failed,
+  stale, or any territory failed this cycle) → `UNAVAILABLE` ("could not be
+  confirmed right now"). This never claims untrusted when the list that
+  would have vindicated the issuer might simply be missing.
+  A Subject-`C=`-country-attribution heuristic (to narrow "degraded" down
+  to only the affected territory) was considered and deliberately dropped
+  for v1 as an over-engineered, imperfect signal (cross-border TSPs exist);
+  worth revisiting as a v2 refinement if false-`UNAVAILABLE` results turn
+  out to be common in practice.
+- **`TrustChainStatus` gained a 4th value, `UNAVAILABLE`**, distinct from
+  `UNKNOWN` ("not checked at all" — the default when `verify_pdf()` is
+  called without a `trust_list` snapshot, preserving all Day-1 behavior and
+  tests unchanged).
+- **Point-in-time correctness**: `QualificationAssessor` is evaluated at
+  signing time, not verification time, via `ServiceHistory`-aware lookups —
+  a CA validly granted at signing time but later withdrawn doesn't
+  retroactively untrust an old document, and vice versa. Guarded further:
+  signing time is only trusted as the qualification "moment" when it comes
+  from a verified timestamp, not a bare self-reported `/M` claim — otherwise
+  a forged signing time could be used to cherry-pick a moment when a
+  since-withdrawn CA was still granted; falls back to verification time in
+  that case.
+- **QTST timestamps get the same trust-chain treatment as CA/QC signatures**,
+  both for a signature's embedded RFC 3161 timestamp and for standalone
+  `/DocTimeStamp` items. `TimestampQuality.QUALIFIED_TSA` is now actually set
+  (previously unused) when the TSA is a granted, cert-qualified QTST
+  service; plain-language copy distinguishes "backed by a qualified
+  timestamp" from "the signer's own claim" (`CLAIMED_ONLY`) accordingly.
+  Note: a genuinely qualified TSA cert needs its own qcStatements
+  (`QcCompliance`) for `QualificationAssessor` to credit it — TL membership
+  alone isn't sufficient, matching how it treats ordinary signer certs; this
+  tripped up an early version of the test fixtures.
+- **Tests (`core/tests/test_trust_list.py`)**: no network calls. Real,
+  **untrimmed** fixtures committed at `core/tests/fixtures/trust_list/`
+  (~640 KB total, well under the ~5 MB budget) — the full real EU LOTL plus
+  two small real, untrimmed member-state lists (Malta for CA/QC coverage,
+  Iceland for QTST coverage, chosen for small file size among ~30 states).
+  These can't be trimmed by hand the way "fixture size" ask implies: TL/LOTL
+  XML carries an XAdES signature over the whole document, so deleting most
+  entries invalidates it; "trimming" is done at query time instead via
+  `build_snapshot(..., only_territories={...})`, not by editing the XML
+  bytes. Covers: real LOTL+TL parsing and signature verification, one
+  territory failing while another succeeds, a tampered member-state list
+  being isolated rather than aborting the whole refresh, a corrupted LOTL
+  producing global `UNAVAILABLE`, `TrustListCache` refresh/retention
+  behavior, and the full `verify_pdf(..., trust_list=...)` integration
+  (granted+qualified → `TRUSTED`; unregistered+fresh → `UNTRUSTED`;
+  unregistered+degraded → `UNAVAILABLE`; registered-but-not-qualified →
+  `UNTRUSTED`; QTST-backed embedded and standalone timestamps →
+  `QUALIFIED_TSA`). 27/27 tests passing. Matching/qualification tests build
+  `TSPRegistry` objects directly in Python (no XML) against Day-1's
+  self-signed test certs, decoupled from XML-parsing concerns.
+- Day-1's shared test fixture (`generate_self_signed_signer`) now adds a
+  `KeyUsage` extension (`digital_signature` + `content_commitment`) by
+  default — real signing certs always declare this, and it's required for
+  `pyhanko_certvalidator` path-building to succeed at all once a
+  `ValidationContext` is actually supplied; harmless to the existing 12
+  Day-1 tests, which don't assert on certificate extensions.
 
 ## Key implementation decisions
 
@@ -41,12 +158,11 @@ Status as of 2026-07-07, end of Day 1 (per BUILD_GUIDE.md).
   the specific missing piece(s) named in `technical_detail`. Never
   over-claim, per CLAUDE.md.
 - **Level is decoupled from Trust chain on purpose**: `level` reflects only
-  what the certificate *claims*; `trust_chain_status` stays `unknown` until
-  the EU Trusted List engine exists. Plain-language copy is explicit about
-  this split (e.g. "issuer has not yet been checked against the EU Trusted
-  List") so nothing is silently over-promised in the UI later. Final
-  "confirmed qualified" verdict logic will combine both fields — that's Day
-  2+ work, not yet built.
+  what the certificate *claims* (Day 1's qcStatements-only classifier,
+  untouched by Day 2); `trust_chain_status` now reflects the real EU Trusted
+  List check. The final "confirmed qualified" verdict logic combining both
+  fields is still Day 2+ work (`_overall_verdict()` in `verify.py` remains
+  the Day-1 placeholder — see Next).
 - **Level is also decoupled from integrity, except when integrity is
   broken**: type (signature vs seal) is derived from QcType regardless of
   whether the signature validates, since a seal claim doesn't stop being a
@@ -55,25 +171,17 @@ Status as of 2026-07-07, end of Day 1 (per BUILD_GUIDE.md).
   — it can't be credited as "advanced" if it doesn't even hold up
   cryptographically.
 - **Reuse pyHanko's own ASN.1 definitions for qcStatements** rather than
-  redefining the OID table from scratch. Importing `pyhanko.sign` has a
-  process-wide side effect of registering the qcStatements extension OID
-  with asn1crypto's global extension registry (via
-  `pyhanko.sign.ades.qualified_asn1`), so a locally-scoped from-scratch
-  ASN.1 definition would have fought that global state. Using pyHanko's own
-  `get_qc_statements()` sidesteps the issue entirely and avoids duplicating
-  a correct, already-tested OID table. What's genuinely custom to this
-  project is the classification/fallback logic layered on top, not the
-  ASN.1 parsing.
+  redefining the OID table from scratch (Day 1), and **reuse pyHanko's own
+  ETSI TS 119 612 engine wholesale** rather than reimplementing LOTL/TL
+  parsing or XML-dsig verification (Day 2) — the same philosophy applied
+  twice. What's genuinely custom to this project is the
+  classification/fallback logic and the caching/degraded-mode bookkeeping
+  layered on top, not the parsing or cryptography underneath.
 - **`ModificationLevel` mapping**: pyHanko's diff analysis produces
   `NONE < LTA_UPDATES < FORM_FILLING < ANNOTATIONS < OTHER`. Only `NONE` and
   `LTA_UPDATES` are treated as non-tampering for now; `FORM_FILLING`,
   `ANNOTATIONS`, and `OTHER` all conservatively count as
-  `modified_after_signing=True` until each is deliberately handled. Note:
-  an early tampering fixture that only touched the `/Info` dictionary
-  turned out to be classified as `LTA_UPDATES` by pyHanko's default policy
-  (metadata-only changes are apparently lenient there) — the real tampering
-  fixture mutates the page's `/MediaBox` instead, which reliably yields
-  `OTHER`.
+  `modified_after_signing=True` until each is deliberately handled.
 
 ## Open items
 
@@ -85,19 +193,27 @@ Status as of 2026-07-07, end of Day 1 (per BUILD_GUIDE.md).
   source a genuinely QES-signed Scrive document (Global/qualified variant)
   and confirm it reports `level=QUALIFIED`, `type=SIGNATURE`, with the
   expected plain-language copy.
+- **Subject-`C=` country-attribution heuristic (v2 candidate)**: dropped for
+  v1's degraded-mode logic (see above) in favor of a simpler, always-honest
+  rule that never narrows "unavailable" down to a specific territory. If
+  real-world usage shows too many `UNAVAILABLE` results because one
+  irrelevant territory's list is flaky, revisit narrowing this by the
+  issuing CA's Subject `C=` attribute — with the caveat that it's an
+  imperfect signal (cross-border TSPs exist).
+- **Cache refresh scheduling is not yet wired up anywhere.**
+  `TrustListCache.refresh()` is a plain coroutine by design; nothing calls
+  it yet. The API layer (Day 3+) needs to: call it once at startup (or
+  decide to serve degraded until the first refresh completes), then run it
+  on a 24h loop (e.g. a FastAPI lifespan background task).
 
-## Next: Day 2 per BUILD_GUIDE.md
+## Next: Day 2, remainder per BUILD_GUIDE.md
 
-1. **Trusted List engine**: fetch the EU LOTL, resolve member-state TL
-   URLs, parse trust service entries (CA/QC + QTST timestamp services),
-   in-memory cache with per-list staleness flags and a 24h refresh loop.
-   Degraded mode: if a list is unreachable, verification still proceeds and
-   `trust_chain_status` reports "could not be confirmed right now" rather
-   than failing the whole verdict.
-2. **Revocation checking**: OCSP/CRL via pyHanko's validation context, hard
+1. **Revocation checking**: OCSP/CRL via pyHanko's validation context, hard
    5s timeout per endpoint; timeout/unreachable → "revocation status
-   unavailable" rather than a failed verdict.
-3. **Overall verdict logic**: combine `level` + `trust_chain_status` (+
+   unavailable" rather than a failed verdict. The `ValidationContext` built
+   in `verify_pdf` currently sets `allow_fetching=False` deliberately to
+   keep revocation out of this module's scope — this is where that changes.
+2. **Overall verdict logic**: combine `level` + `trust_chain_status` (+
    revocation) into the final trusted / partial / not-trusted /
    no-signatures verdict per PRD section 6, with uncertainty (degraded TL,
    unavailable revocation) lowering confidence honestly rather than

@@ -14,6 +14,7 @@ from .models import (
     VerificationResult,
     VerificationVerdict,
 )
+from .trust_list import TrustListCache, TrustListSnapshot
 from .verify import verify_pdf
 
 __all__ = [
@@ -27,6 +28,8 @@ __all__ = [
     'SignatureType',
     'TimestampQuality',
     'TrustChainStatus',
+    'TrustListCache',
+    'TrustListSnapshot',
     'VerificationResult',
     'VerificationVerdict',
     'verify_pdf',

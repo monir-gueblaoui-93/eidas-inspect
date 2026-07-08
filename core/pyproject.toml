@@ -4,8 +4,8 @@ version = "0.1.0"
 description = "Pure Python validation core for eidas-inspect: signature discovery, integrity checking, and plain-language eIDAS verdict mapping."
 requires-python = ">=3.12"
 dependencies = [
-    "pyhanko>=0.25.0",
-    "pyhanko-certvalidator>=0.26.0",
+    "pyhanko[etsi,async-http]>=0.35.2",
+    "pyhanko-certvalidator>=0.31.1",
 ]
 
 [project.optional-dependencies]
