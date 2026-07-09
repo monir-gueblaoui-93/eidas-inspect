@@ -80,3 +80,41 @@ def sloppy_qc_signed_pdf(unsigned_pdf):
         qc_type_oid=None,
     )
     return sign_pdf_bytes(unsigned_pdf, sloppy_signer)
+
+
+@pytest.fixture
+def multi_signer_pdf(unsigned_pdf):
+    """A real two-signer PDF, genuinely mixed: Alice's certificate declares
+    a qualified signature, Bob's is a plain advanced one -- and, per this
+    project's own conservative diff-analysis policy (see
+    ``_modification_status``), Alice's earlier signature gets flagged with
+    an integrity issue purely because Bob co-signed over it afterwards,
+    while Bob's (the last revision) reads clean. Not a contrived edge
+    case: any real two-signer PDF produces exactly this shape today, so
+    this is what "mixed validity" honestly looks like for a multi-sig
+    document right now, not a hand-picked pair of outcomes."""
+    alice = generate_self_signed_signer(
+        common_name='Alice Natural Person',
+        organization='Test QTSP',
+        qc_compliance=True,
+        qc_sscd=True,
+        qc_type_oid=QC_TYPE_ESIGN_OID,
+    )
+    bob = generate_self_signed_signer(common_name='Bob', organization='Org B')
+    once = sign_pdf_bytes(unsigned_pdf, alice, field_name='Signature1')
+    return sign_pdf_bytes(once, bob, field_name='Signature2')
+
+
+@pytest.fixture
+def document_timestamp_only_pdf(unsigned_pdf):
+    """A PDF carrying only a standalone document timestamp -- no /Sig field
+    at all, just a bare /DocTimeStamp applied straight to an otherwise
+    unsigned document. A real, if less common, case in its own right (a
+    timestamp asserting a document existed, unchanged, at some moment,
+    without anyone having signed it) -- and a genuinely different shape
+    from ``lta_extended_signed_pdf``, which timestamps an *already-signed*
+    document. Reuses ``add_lta_timestamp`` for the timestamping mechanics
+    (a real, local DummyTimeStamper -- no network calls); the "LTA" framing
+    in that helper's name doesn't apply here since there's no prior
+    signature for this to be a long-term-archival extension *of*."""
+    return add_lta_timestamp(unsigned_pdf)

@@ -122,6 +122,44 @@ def test_certificate_details_are_structured_and_distinguish_subject_from_issuer(
     assert not cert.serial_number.endswith(':')
 
 
+def test_multi_signer_pdf_reports_both_signers_with_mixed_outcomes(multi_signer_pdf):
+    result = verify_pdf(multi_signer_pdf)
+
+    assert len(result.items) == 2
+    alice_item = next(i for i in result.items if i.signer_name == 'Alice Natural Person')
+    bob_item = next(i for i in result.items if i.signer_name == 'Bob')
+
+    # Alice's certificate declares a qualified signature, but her (earlier)
+    # revision is conservatively flagged once Bob co-signs over it.
+    assert alice_item.level == SignatureLevel.QUALIFIED
+    assert alice_item.integrity.modified_after_signing is True
+
+    # Bob's (the last) revision is clean, but his plain certificate never
+    # claimed qualified in the first place.
+    assert bob_item.level == SignatureLevel.ADVANCED
+    assert bob_item.integrity.modified_after_signing is False
+
+    assert result.verdict == VerificationVerdict.PARTIAL
+    assert result.verdict_breakdown.total == 2
+
+
+def test_document_timestamp_only_pdf_is_a_single_timestamp_item(document_timestamp_only_pdf):
+    result = verify_pdf(document_timestamp_only_pdf)
+
+    assert result.verdict != VerificationVerdict.NO_SIGNATURES
+    assert len(result.items) == 1
+    item = result.items[0]
+    assert item.type == SignatureType.TIMESTAMP
+    assert item.integrity.intact is True
+    assert item.integrity.signature_valid is True
+    assert item.signing_time is not None
+    assert 'timestamp' in item.plain_explanation.lower()
+    # The stand-in TSA isn't a registered/qualified authority, so this is
+    # an honest "not qualified", not "unconfirmed" or "issue".
+    assert result.verdict == VerificationVerdict.PARTIAL
+    assert result.verdict_breakdown.not_qualified == 1
+
+
 def test_lta_extension_is_not_treated_as_tampering(lta_extended_signed_pdf):
     result = verify_pdf(lta_extended_signed_pdf)
 

@@ -1248,13 +1248,72 @@ never committed, same rule as `Demo document.pdf`/`qes_document.pdf`/
    this checkpoint to be the same external trust-chain gap for both
    tiers, not our own code, not specific to Guardtime's demo file.
 
-## Next: Day 7 -- polish
+## Done (Day 7): wider in-process fixture set
 
-1. Review the new card design on the live Railway URL (auto-deployed on
-   push) -- this environment still has no browser to do that pass itself.
-2. README demo GIF; a small real-world test-document set beyond the two
-   documents used so far (BankID-signed, D-Trust-sealed, a genuinely
-   broken-seal fixture), per the PRD's own recommended open item.
+Feature freeze in effect (no new verification capabilities) -- this is
+test coverage and docs only.
+
+- **`multi_signer_pdf`** (`core/tests/conftest.py`): a real two-signer
+  PDF -- Alice's certificate declares a qualified signature, Bob's is
+  plain advanced. Deliberately not a hand-picked pair of outcomes:
+  because of this project's own conservative diff-analysis policy (see
+  `_modification_status`), Alice's earlier revision gets flagged with an
+  integrity issue purely because Bob co-signed over it afterwards, while
+  Bob's (the last revision) reads clean. This is what "mixed validity"
+  honestly looks like for any real multi-sig document under today's
+  code, not a contrived edge case -- confirmed via a new item-level test,
+  `test_multi_signer_pdf_reports_both_signers_with_mixed_outcomes`.
+  (A real, aggregate-verdict-level version of this same two-signer shape
+  already existed in `test_verdict.py`; this promotes it to a reusable
+  fixture and adds the item-level assertions that test didn't cover.)
+- **`document_timestamp_only_pdf`**: a PDF carrying only a standalone
+  `/DocTimeStamp` -- no `/Sig` field at all, unlike
+  `lta_extended_signed_pdf` (which timestamps an already-signed
+  document). Reuses `add_lta_timestamp` applied directly to an unsigned
+  base PDF. New test confirms this resolves to a single `TIMESTAMP` item
+  (not `NO_SIGNATURES`) and an honest `PARTIAL`/`not_qualified` verdict,
+  since the stand-in TSA isn't a registered authority.
+- **Unsigned PDF**: already covered (`unsigned_pdf` fixture, tested in
+  both `test_verify_pdf.py` and `test_verdict.py`) -- confirmed, no gap
+  to fill.
+- 101/101 across `core/` + `api/` combined (was 99).
+
+### Manual test documents (real files, gitignored, never committed)
+
+Beyond the in-process fixtures above, a few real vendor documents have
+been used for manual/ad hoc verification throughout this project and
+stay local-only (see `.gitignore`) -- listed here so a future session
+knows they exist and what each is good for, without ever committing
+them:
+
+- **`Demo document.pdf`** -- an ordinary real signed PDF, plain advanced
+  signature (no qcStatements). Day-1 regression case: resolves to
+  `partial`/"valid but not qualified".
+- **`qes_document.pdf`** -- a real QES-signed document (Norwegian
+  signer/territory `NO`). Resolves to `trusted`, with
+  `revocation_source: embedded` once a Trusted List + revocation
+  checking are wired in -- the main real-world "everything confirmed"
+  acceptance case used throughout Days 2-6.
+- **`ksi_sample.pdf`** -- a real Scrive-produced KSI seal (see the KSI
+  feature section above for its full validation writeup). Carries a
+  Calendar Authentication Record; currently resolves to `internal_only`
+  because of the external GlobalSign trust-chain gap, not a bug here.
+
+(`test-real.pdf` was an even earlier Day-1 ad hoc file, superseded by
+the two above -- no longer present on disk; its `.gitignore` entry is
+harmless to leave as-is.)
+
+## Next: Day 7 -- polish, continued
+
+1. Review the new KSI card design on the live Railway URL against a
+   real KSI-sealed document -- confirmed the deploy itself is current
+   (see below), but a full visual pass there is still only done via the
+   local dev server so far.
+2. README demo GIF and hero screenshot (placeholders added to README;
+   images to be dropped in separately).
+3. A small real-world test-document set beyond what's listed above
+   (BankID-signed, D-Trust-sealed, a genuinely broken-seal fixture),
+   per the PRD's own recommended open item -- still open.
 
 Also still open from earlier days:
 - The Subject-`C=` territory-attribution heuristic remains deliberately
