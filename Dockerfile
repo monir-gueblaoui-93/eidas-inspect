@@ -12,7 +12,13 @@ RUN npm run build
 
 
 # ---------- Stage 2: Python runtime ----------
-FROM python:3.12-slim AS runtime
+# Pinned to bookworm (Debian 12) explicitly, not just "slim" (which floats
+# to whatever Debian release is current -- already trixie/13 as of this
+# writing): Guardtime's own ksi-tool APT repo only publishes a bookworm
+# build, and it's amd64-only, hence --platform below. Railway's own build
+# infrastructure is amd64, so pinning it here removes any ambiguity rather
+# than relying on the host architecture at build time.
+FROM --platform=linux/amd64 python:3.12-slim-bookworm AS runtime
 WORKDIR /app
 
 # core/ first (changes less often than api/), for better layer caching.
@@ -23,6 +29,28 @@ RUN pip install --no-cache-dir ./core
 # api/'s own (production-only -- no httpx/pytest) requirements.
 COPY api/requirements.txt api/requirements.txt
 RUN pip install --no-cache-dir -r api/requirements.txt
+
+# ksi-tool (Apache-2.0, github.com/guardtime/ksi-tool): Guardtime's own
+# reference implementation for verifying KSI (Keyless Signature
+# Infrastructure) seals -- eidas_inspect_core.ksi_tool subprocesses out to
+# this rather than reimplementing KSI's hash-chain/publications-file
+# cryptography ourselves, the same rule this project already applies to
+# pyHanko for PAdES/CMS. Versions pinned (ksi-tools/libksi/libparamset,
+# all Apache-2.0) so a Dockerfile rebuild can't silently pick up a newer
+# release with different behavior; bump deliberately. curl/gnupg only
+# exist to fetch and verify Guardtime's own APT signing key -- not needed
+# at runtime, but keeping them is cheap and they're tiny.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl gnupg ca-certificates \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://download.guardtime.com/ksi/GUARDTIME-GPG-KEY-2 \
+        | gpg --dearmor -o /etc/apt/keyrings/GUARDTIME-GPG-KEY-2 \
+    && curl -fsSL https://download.guardtime.com/ksi/configuration/guardtime.bookworm.list \
+        -o /etc/apt/sources.list.d/guardtime.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ksi-tools=2.10.1387 libksi=3.21.3087 libparamset=1.1.244 \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY api api
 

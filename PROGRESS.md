@@ -986,34 +986,130 @@ implemented checkpoint by checkpoint per that approval.
   envelope, keeping the "schema mirrors core exactly" contract intact.
   80/80 across `core/` + `api/`.
 
+### Done: checkpoint 2 -- verification tiers via `ksi-tool` subprocess
+
+- **New module `eidas_inspect_core.ksi_tool`**: `KsiToolRunner`, an
+  injectable subprocess boundary (mirrors `RevocationFetchers`' DI
+  pattern -- tests inject a stub `invoke`, never shell out to a real
+  binary). `verify_internal`/`verify_publication_based` both always bind
+  to this specific document's hash via `-f` (never a bare, document-free
+  `--ver-int` check) -- deliberate: without that binding, a genuine
+  KSI token pasted onto an unrelated document would still read as
+  "internally consistent", true but actively misleading for a
+  per-document seal verifier.
+- **Output parsing confirmed empirically, not guessed**: installed
+  `ksi-tool` locally (Homebrew's official `guardtime/ksi` tap, after
+  inspecting the formula before trusting a third-party tap) specifically
+  to run the real binary against a real signature before writing any
+  parsing code. Extracted the actual KSI token + `/ByteRange`-covered
+  bytes from Guardtime's own demo file
+  (`github.com/guardtime/ksi-pdf-verifier`'s `demo/signed.pdf`, Apache-2.0)
+  and ran real `--dump` output through internal, tampered, and
+  publication-based checks. Confirmed: the "Final result:" line uses
+  exactly three tokens (`OK`, `NA`, `FAIL` -- not "FAILED", despite the
+  man page's prose), identity metadata and aggregation ("signing") time
+  are both present in a clean, regex-parseable form. These exact
+  transcripts are now committed as canned fixtures in
+  `test_ksi_tool.py` and as real binary files in
+  `core/tests/fixtures/ksi/` (with a README noting provenance).
+- **Tier computation wired into `_build_ksi_seal_item`**: internal check
+  first; `FAIL` -> `BROKEN`, anything but `OK` -> `NOT_VERIFIED` (no base
+  to build on). If internal holds, publication-based check follows:
+  `OK` -> `PUBLICATION_VERIFIED`, `FAIL` -> `BROKEN` (a real mismatch,
+  never silently downgraded to a milder tier), otherwise ->
+  `INTERNAL_ONLY`. `verdict_reason` mapping decided: KSI's two "verified"
+  tiers reuse `NOT_QUALIFIED`'s bucket (imprecise -- its usual banner
+  text doesn't distinguish a publicly-witnessed KSI seal from an
+  ordinary advanced X.509 signature -- but a dedicated bucket would
+  ripple into `VerdictBreakdown`, the API schema, and the already-shipped
+  frontend banner; deferred to the point-in-time-wording checkpoint,
+  which touches this same area anyway). The full nuance is never lost:
+  it's always on the item via `ksi_verification_tier`.
+- **API wiring**: `create_app(ksi_runner=...)`, threaded through
+  `verify_upload` to `verify_pdf`. Deliberately *not* defaulted the way
+  `revocation_fetchers` implicitly falls back to live network fetchers:
+  `ksi-tool` is an optional external binary, not a pip dependency, so
+  `ksi_runner=None` means "skip tiers, report `NOT_VERIFIED`" unless
+  explicitly opted in. Production's module-level `app` opts in
+  explicitly (`KsiToolRunner()`); tests stay hermetic by default via the
+  same `app_factory(ksi_runner=...)` injection point already used for
+  `revocation_fetchers`.
+- **A real, non-obvious finding, confirmed in a clean container, not just
+  locally**: publication-based verification against Guardtime's own live
+  publications file currently can't reach a conclusive `OK` in *any*
+  environment tested (local Homebrew build, or a clean
+  `python:3.12-slim-bookworm` container with a full, current
+  `ca-certificates` bundle) -- `ksi-tool` reports
+  `[GEN-02] ... unable to get local issuer certificate`. Root-caused, not
+  just observed: extracted the actual DER certs embedded in the live
+  publications file by hand (`openssl` can't parse the file directly --
+  it's KSI's own TLV format, not CMS) and found the chain runs through
+  **GlobalSign Document Signing Root R45** -- a specialized document-signing
+  root, not a general TLS root, and not part of Debian's (or macOS's)
+  standard CA bundle. Downloaded that exact root from GlobalSign directly
+  and tried supplying it via `ksi-tool`'s own `-V` flag; it was rejected
+  ("Unable to add cert to PKI trust store") -- a further libksi/OpenSSL
+  compatibility snag not resolved in this checkpoint. **Practical
+  consequence: `PUBLICATION_VERIFIED` is correctly wired but not
+  currently reachable against the live publications file** -- every
+  real seal tested lands on `INTERNAL_ONLY` (or `BROKEN`, correctly, for
+  a genuinely tampered one) instead. This is an external limitation in
+  Guardtime's own published trust chain, not a bug in this project's
+  code: the fallback to `INTERNAL_ONLY` is exactly the honest,
+  degraded-but-correct behavior the whole tier system exists to produce
+  when a check can't reach a conclusive answer. Sourcing/trusting the
+  right anchor (or getting `-V` to accept it) is a well-scoped v2
+  follow-up, not a blocker.
+- **Serendipitous real-world validation**: Guardtime's own demo PDF
+  turned out to contain *three* separate KSI seals, not the one found
+  during research -- and one of them is genuinely broken (a real
+  document-hash mismatch, `[GEN-01] Wrong document`), almost certainly
+  included deliberately by Guardtime to exercise their own verifier's
+  failure path. Running it through our full pipeline produced exactly
+  the expected mix (`internal_only`, `broken`, `internal_only`) with
+  zero code changes needed -- real, independent confirmation that
+  discovery, extraction, hashing, and tier mapping are all correct
+  together, not just individually unit-tested.
+- **Container verification performed before pushing, per instruction**:
+  `python:3.12-slim` was pinned to `python:3.12-slim-bookworm` (Guardtime
+  only publishes a Debian 12/bookworm APT repo; the plain `-slim` tag has
+  already moved to Debian 13/trixie) and the build pinned to
+  `--platform linux/amd64` (Guardtime's repo is amd64-only; Railway's
+  build infrastructure is amd64 anyway, so this removes ambiguity rather
+  than relying on the build host's own architecture). Had to install
+  Homebrew's `docker-buildx` plugin (the legacy builder can't resolve a
+  per-stage `--platform` correctly). Built the real image, confirmed
+  `ksi-tools`/`libksi`/`libparamset` present at the exact pinned versions
+  via `dpkg -l`, ran the container, and POSTed Guardtime's real
+  three-seal demo PDF to the actual `/api/verify` endpoint -- identical,
+  correct results to the local run. A plain non-KSI document
+  (`Demo document.pdf`) was re-checked too, as a regression guard.
+- 10 new core tests (tier computation via stubbed runners, covering every
+  branch: publication-verified, internal-only, broken-via-internal,
+  broken-via-publication-mismatch, tool-error-falls-back-to-not-verified)
+  plus 6 unit tests for the output parser (using the real captured
+  transcripts) plus 3 skip-if-missing-binary integration tests that
+  exercise the real installed binary when available (this machine, and
+  now the container). 94/94 across `core/` + `api/` combined.
+
 ### Next for this feature
 
-1. **Verification tiers via `ksi-tool` subprocess**: internal-consistency
-   (`--ver-int`) and publication-based (`--ver-pub`) checks, wired into
-   `_build_ksi_seal_item`. Needs: an APT-installed, version-pinned
-   `ksi-tool` in the Dockerfile (license noted in README's dependencies
-   per the approved plan), a thin subprocess wrapper module in core with
-   an injectable "invoke" hook (matching how `RevocationFetchers`/
-   `Fetcher` are injectable elsewhere, so tests stay offline), and a
-   design decision on exactly what verdict_reason/tier a
-   publication-verified seal maps to (not `CONFIRMED_QUALIFIED` --
-   that's specifically an eIDAS-qualified claim we're not making for
-   KSI; needs its own wording, not yet decided).
-2. **Key-based tier**: held pending a real Scrive-produced sample
+1. **Key-based tier**: still held pending a real Scrive-produced sample
    document, to confirm whether an unextended signature actually carries
-   a calendar authentication record in practice (strongly suggested by
-   Guardtime's docs, not yet empirically confirmed). Also the moment to
-   diff-check the real sample against Guardtime's reference embedding
-   structure confirmed above.
-3. **Point-in-time qualification wording**: "sealed before 2025-06-12" ->
+   a calendar authentication record in practice, and to diff-check the
+   real sample against Guardtime's reference embedding structure
+   confirmed in checkpoint 1.
+2. **Point-in-time qualification wording**: "sealed before 2025-06-12" ->
    honest note that the sealing service was eIDAS-qualified at the time.
    Needs the `read_qualified_service_definitions()`-based boundary lookup
-   described above (not yet implemented) -- deriving the date from TL
-   data, never hardcoding it. Wording-only; no new verdict tier.
-   Reminder from the approved plan: the module-level docstring/comment
-   trail above should make clear *why* this needed new parsing rather
-   than reusing `TSPRegistry` as-is, so a future reader doesn't assume
-   the boundary lookup is trivial.
+   described in checkpoint 1's research notes (not yet implemented) --
+   deriving the date from TL data, never hardcoding it. Wording-only; no
+   new verdict tier.
+3. **`PUBLICATION_VERIFIED` reachability**: sourcing/trusting the correct
+   root (or resolving the `-V` rejection) so a genuinely extended,
+   publicly-witnessed KSI seal can actually reach its strongest tier
+   against the live publications file -- currently blocked on the
+   external trust-chain gap documented above, not on our own code.
 4. **UI**: a distinct icon for `KSI_SEAL` (link/chain metaphor, not the
    existing person/building/clock set) and a new "What is a KSI seal?"
    glossary entry (one plain paragraph, publicly-witnessed-record

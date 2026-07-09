@@ -8,6 +8,7 @@ running loop).
 from starlette.concurrency import run_in_threadpool
 
 from eidas_inspect_core import VerificationResult, verify_pdf
+from eidas_inspect_core.ksi_tool import KsiToolRunner
 from eidas_inspect_core.revocation import RevocationFetchers
 from eidas_inspect_core.trust_list import TrustListCache
 
@@ -32,6 +33,7 @@ async def verify_upload(
     password: str | None,
     trust_list_cache: TrustListCache,
     revocation_fetchers: RevocationFetchers | None,
+    ksi_runner: KsiToolRunner | None = None,
 ) -> VerificationResult:
     check_upload_size(data)
     check_looks_like_pdf(data)
@@ -42,4 +44,5 @@ async def verify_upload(
         trust_list_cache.snapshot,
         settings.check_revocation,
         revocation_fetchers,
+        ksi_runner,
     )

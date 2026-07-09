@@ -49,6 +49,10 @@ pytest core/tests
 
 This is an informational tool, not a qualified validation service under eIDAS Article 33, and nothing it says is legal advice. It's a personal project — use your own judgment for anything that matters.
 
+## Dependencies
+
+Besides the usual Python/JS package ecosystem (see `core/pyproject.toml`, `api/requirements.txt`, `web/package.json`), the production image installs Guardtime's official [`ksi-tool`](https://github.com/guardtime/ksi-tool) CLI (Apache-2.0) for verifying KSI (Keyless Signature Infrastructure) seals — this project subprocesses out to it rather than reimplementing KSI's own cryptography, the same rule it already follows for pyHanko and PAdES/CMS.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

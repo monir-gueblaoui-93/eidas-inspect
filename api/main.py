@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from slowapi.errors import RateLimitExceeded
 from starlette.formparsers import MultiPartParser
 
+from eidas_inspect_core.ksi_tool import KsiToolRunner
 from eidas_inspect_core.revocation import RevocationFetchers
 from eidas_inspect_core.trust_list import TrustListCache
 
@@ -51,6 +52,7 @@ def create_app(
     *,
     trust_list_cache: TrustListCache | None = None,
     revocation_fetchers: RevocationFetchers | None = None,
+    ksi_runner: KsiToolRunner | None = None,
     start_background_refresh: bool = True,
 ) -> FastAPI:
     configure_logging()
@@ -62,6 +64,15 @@ def create_app(
         # refresh completes, rather than blocking startup on a network call.
         app.state.trust_list_cache = cache
         app.state.revocation_fetchers = revocation_fetchers
+        # None here means "skip KSI verification tiers, report
+        # NOT_VERIFIED" (see verify.py) -- deliberately not defaulted to a
+        # real KsiToolRunner() the way revocation_fetchers implicitly
+        # falls back to live network fetchers, because ksi-tool is an
+        # optional external binary (not a pip dependency, not guaranteed
+        # present) rather than something always available. Production
+        # opts in explicitly at the bottom of this module; tests stay
+        # hermetic by default.
+        app.state.ksi_runner = ksi_runner
         app.state.counters_db_path = resolve_counters_db_path(settings.counters_db_path)
         refresh_task = (
             asyncio.create_task(_trust_list_refresh_loop(cache))
@@ -91,4 +102,4 @@ def create_app(
     return app
 
 
-app = create_app()
+app = create_app(ksi_runner=KsiToolRunner())

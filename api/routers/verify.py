@@ -25,7 +25,10 @@ async def verify(
 
     trust_list_cache = request.app.state.trust_list_cache
     revocation_fetchers = request.app.state.revocation_fetchers
-    result = await verify_upload(data, password, trust_list_cache, revocation_fetchers)
+    ksi_runner = request.app.state.ksi_runner
+    result = await verify_upload(
+        data, password, trust_list_cache, revocation_fetchers, ksi_runner
+    )
 
     try:
         await run_in_threadpool(

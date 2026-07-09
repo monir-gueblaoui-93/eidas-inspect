@@ -1,6 +1,8 @@
 import asyncio
 import hashlib
 import io
+import os
+import tempfile
 from datetime import datetime, timezone
 
 from asn1crypto import x509
@@ -24,6 +26,7 @@ from pyhanko_certvalidator import ValidationContext
 from pyhanko_certvalidator.path import ValidationPath
 
 from .errors import CorruptedPdfError, IncorrectPasswordError, PasswordRequiredError
+from .ksi_tool import KsiCheckOutcome, KsiToolRunner
 from .models import (
     CertificateDetails,
     IntegrityStatus,
@@ -58,6 +61,7 @@ def verify_pdf(
     trust_list: TrustListSnapshot | None = None,
     check_revocation: bool = False,
     revocation_fetchers: RevocationFetchers | None = None,
+    ksi_runner: KsiToolRunner | None = None,
 ) -> VerificationResult:
     document_sha256 = hashlib.sha256(data).hexdigest()
     verified_at = datetime.now(timezone.utc)
@@ -96,7 +100,7 @@ def verify_pdf(
         )
         for sig in embedded_sigs
     ] + [
-        _build_ksi_seal_item(data, field_name, sig_dict)
+        _build_ksi_seal_item(data, field_name, sig_dict, ksi_runner)
         for field_name, sig_dict in ksi_seals
     ]
     verdict, plain_summary, breakdown = _overall_verdict(items)
@@ -148,29 +152,73 @@ def _collect_ksi_seals(reader: PdfFileReader) -> list[tuple[str, object]]:
     return results
 
 
-def _build_ksi_seal_item(data: bytes, field_name: str, sig_dict) -> SignatureItem:
-    """Detection + structural parsing only, for now.
+_KSI_TIER_VERDICT_REASON = {
+    KsiVerificationTier.NOT_VERIFIED: VerdictReason.UNCONFIRMED,
+    KsiVerificationTier.INTERNAL_ONLY: VerdictReason.UNCONFIRMED,
+    KsiVerificationTier.CALENDAR_VERIFIED: VerdictReason.NOT_QUALIFIED,
+    KsiVerificationTier.PUBLICATION_VERIFIED: VerdictReason.NOT_QUALIFIED,
+    KsiVerificationTier.BROKEN: VerdictReason.BROKEN,
+}
+"""Maps each tier onto the existing four-bucket VerdictReason model.
+Reuses NOT_QUALIFIED's bucket for both KSI-verified tiers -- imprecise
+(its usual banner text, "valid but not qualified", doesn't distinguish a
+publicly-witnessed KSI seal from an ordinary advanced X.509 signature),
+but a dedicated bucket would ripple into VerdictBreakdown, the API
+schema, and the already-shipped frontend verdict banner. Deferred to the
+point-in-time-wording checkpoint, which touches this same area anyway.
+The full nuance is never lost in the meantime -- it's always available on
+the item itself via ``ksi_verification_tier``."""
 
-    No cryptographic verification is performed here yet -- that's the
-    verification-tiers phase of this feature (subprocess to ``ksi-tool``;
-    see PROGRESS.md's KSI research notes), which will populate
-    :attr:`~.models.KsiVerificationTier` properly. Until then, every
-    structurally well-formed KSI seal gets
-    :attr:`~.models.KsiVerificationTier.NOT_VERIFIED`, mapped to
-    :attr:`~.models.VerdictReason.UNCONFIRMED` -- not because it fits that
-    reason's usual TL-or-revocation-gap story, but because the resulting
-    banner text ("qualified status could not be confirmed right now") is
-    the honest one; :attr:`~.models.VerdictReason.NOT_QUALIFIED`'s text
-    ("valid but not qualified") would overclaim a validity we haven't
-    actually checked yet.
+_KSI_TIER_PLAIN_TEXT = {
+    KsiVerificationTier.NOT_VERIFIED: (
+        'This document carries a Guardtime KSI seal. This tool does not '
+        "yet perform independent cryptographic verification of KSI seals, "
+        'so its validity could not be confirmed.'
+    ),
+    KsiVerificationTier.INTERNAL_ONLY: (
+        'This document carries a Guardtime KSI seal. Its internal '
+        "consistency checks out, but this tool couldn't independently "
+        'confirm it any further right now -- that requires either the '
+        "sealing provider's live service, or waiting for this seal to be "
+        'extended to a publicly published record.'
+    ),
+    KsiVerificationTier.CALENDAR_VERIFIED: (
+        'This document carries a Guardtime KSI seal, checked against the '
+        "sealing infrastructure's own published signing certificate. It "
+        "hasn't yet been anchored to a publicly witnessed record."
+    ),
+    KsiVerificationTier.PUBLICATION_VERIFIED: (
+        'This document carries a Guardtime KSI seal. It is independently '
+        'verifiable: its integrity is anchored to a publicly published '
+        "record, not any single party's word."
+    ),
+    KsiVerificationTier.BROKEN: (
+        "This seal's integrity could not be confirmed -- the document may "
+        'have been altered, or the seal is corrupted.'
+    ),
+}
+
+
+def _build_ksi_seal_item(
+    data: bytes,
+    field_name: str,
+    sig_dict,
+    ksi_runner: KsiToolRunner | None,
+) -> SignatureItem:
+    """Structural parsing, then (if ``ksi_runner`` is given) real
+    cryptographic verification via a subprocess to Guardtime's own
+    ``ksi-tool`` -- see :mod:`.ksi_tool`. ``ksi_runner=None`` preserves
+    checkpoint 1's detection-only behavior (``NOT_VERIFIED``), e.g. for a
+    caller that hasn't wired up the tool at all.
 
     ``IntegrityStatus.intact``/``.signature_valid`` are booleans with no
     "not yet checked" state to hold, unlike ``RevocationStatus.NOT_CHECKED``
-    elsewhere in this module -- they're set ``True`` here only because
-    ``False`` would be actively wrong (it reads as "a problem was found",
-    not "unknown"), not because cryptographic validity was confirmed. The
-    UI must drive tone/badges for KSI items from ``ksi_verification_tier``,
-    never from these two fields.
+    elsewhere in this module -- for every tier short of a confirmed
+    ``BROKEN``, they're set ``True`` only because ``False`` would be
+    actively wrong (it reads as "a problem was found", not "unknown"),
+    not because cryptographic validity was fully confirmed. The UI must
+    drive tone/badges for KSI items from ``ksi_verification_tier``, never
+    from these two fields.
     """
     try:
         contents = sig_dict['/Contents']
@@ -185,34 +233,114 @@ def _build_ksi_seal_item(data: bytes, field_name: str, sig_dict) -> SignatureIte
         return _unreadable_ksi_seal_item(e)
 
     fully_covered = (byte_range[2] + byte_range[3]) == len(data)
+    covered_bytes = (
+        data[byte_range[0] : byte_range[0] + byte_range[1]]
+        + data[byte_range[2] : byte_range[2] + byte_range[3]]
+    )
+
+    if ksi_runner is None:
+        tier, detail, aggregation_time, identity_chain = (
+            KsiVerificationTier.NOT_VERIFIED,
+            None,
+            None,
+            None,
+        )
+    else:
+        tier, detail, aggregation_time, identity_chain = _run_ksi_verification(
+            ksi_runner, signature_bytes, covered_bytes
+        )
+
+    is_broken = tier is KsiVerificationTier.BROKEN
     integrity = IntegrityStatus(
-        intact=True,
-        signature_valid=True,
+        intact=not is_broken,
+        signature_valid=not is_broken,
         fully_covered=fully_covered,
         modified_after_signing=None,
         lta_extended=False,
     )
 
-    plain = (
-        'This document carries a Guardtime KSI seal. This tool does not '
-        "yet perform independent cryptographic verification of KSI seals, "
-        'so its validity could not be confirmed.'
-    )
-    technical = (
+    technical_parts = [
         f"KSI seal found in field '{field_name}' "
-        f'(Filter={sig_dict.get("/Filter")!r}, {len(signature_bytes)}-byte '
-        'token, ByteRange present). Cryptographic verification (internal '
-        'consistency, publication-based) is not yet implemented.'
-    )
+        f'(Filter={sig_dict.get("/Filter")!r}, {len(signature_bytes)}-byte token).'
+    ]
+    if detail:
+        technical_parts.append(detail)
 
     return SignatureItem(
         type=SignatureType.KSI_SEAL,
         integrity=integrity,
-        plain_explanation=plain,
-        technical_detail=technical,
-        verdict_reason=VerdictReason.UNCONFIRMED,
-        ksi_verification_tier=KsiVerificationTier.NOT_VERIFIED,
+        plain_explanation=_KSI_TIER_PLAIN_TEXT[tier],
+        technical_detail=' '.join(technical_parts),
+        verdict_reason=_KSI_TIER_VERDICT_REASON[tier],
+        ksi_verification_tier=tier,
+        ksi_aggregation_time=aggregation_time,
+        ksi_identity_chain=identity_chain,
     )
+
+
+def _run_ksi_verification(
+    ksi_runner: KsiToolRunner,
+    signature_bytes: bytes,
+    covered_bytes: bytes,
+) -> tuple[KsiVerificationTier, str | None, datetime | None, tuple[str, ...] | None]:
+    """Runs the internal-consistency and (if that holds) publication-based
+    checks via ``ksi-tool``.
+
+    Deliberate, narrow exception to this project's "never written to
+    disk" rule: ``ksi-tool`` is an external CLI that only accepts file
+    paths (no stdin option covers our ``-f <document-hash-source>`` need,
+    since the document's own hash algorithm isn't known to us ahead of
+    parsing the signature -- see PROGRESS.md's KSI research notes on why
+    letting ksi-tool hash the file itself, rather than us precomputing a
+    hash, is the correct approach here). The signature and document bytes
+    exist on disk only for the lifetime of this one temporary directory,
+    deleted immediately after (even on exception, via the context
+    manager) -- never logged, never left behind.
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        signature_path = os.path.join(tmp_dir, 'seal.ksig')
+        data_path = os.path.join(tmp_dir, 'document.bin')
+        with open(signature_path, 'wb') as f:
+            f.write(signature_bytes)
+        with open(data_path, 'wb') as f:
+            f.write(covered_bytes)
+
+        internal = ksi_runner.verify_internal(signature_path, data_path)
+        if internal.outcome is KsiCheckOutcome.FAIL:
+            return (
+                KsiVerificationTier.BROKEN,
+                internal.detail,
+                internal.aggregation_time,
+                internal.identity_chain,
+            )
+        if internal.outcome is not KsiCheckOutcome.OK:
+            # TOOL_ERROR, or an unexpected NA on a document-bound internal
+            # check -- no base consistency answer to build further tiers on.
+            return (
+                KsiVerificationTier.NOT_VERIFIED,
+                internal.detail,
+                internal.aggregation_time,
+                internal.identity_chain,
+            )
+
+        publication = ksi_runner.verify_publication_based(signature_path, data_path)
+        if publication.outcome is KsiCheckOutcome.OK:
+            tier = KsiVerificationTier.PUBLICATION_VERIFIED
+            detail = None
+        elif publication.outcome is KsiCheckOutcome.FAIL:
+            # Internal consistency held, but the publication-based check
+            # found a real mismatch -- treat conservatively as broken
+            # rather than silently downgrading to "couldn't confirm".
+            tier = KsiVerificationTier.BROKEN
+            detail = publication.detail
+        else:
+            # NA (not yet extended -- the common, expected case for a
+            # freshly-sealed document) or TOOL_ERROR (e.g. the
+            # publications file couldn't be fetched/verified just now).
+            tier = KsiVerificationTier.INTERNAL_ONLY
+            detail = publication.detail
+
+        return tier, detail, internal.aggregation_time, internal.identity_chain
 
 
 def _unreadable_ksi_seal_item(error: Exception) -> SignatureItem:

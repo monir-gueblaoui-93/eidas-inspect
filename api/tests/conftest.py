@@ -36,6 +36,7 @@ from trust_list_fixtures import (  # noqa: E402
 
 from api.main import create_app  # noqa: E402
 from api.rate_limit import limiter  # noqa: E402
+from eidas_inspect_core.ksi_tool import KsiToolRunner  # noqa: E402
 from eidas_inspect_core.revocation import RevocationFetchers  # noqa: E402
 from eidas_inspect_core.trust_list import TrustListCache  # noqa: E402
 
@@ -67,7 +68,11 @@ def app_factory():
     """
     clients: list[TestClient] = []
 
-    def _make(snapshot=None, revocation_fetchers: RevocationFetchers | None = None):
+    def _make(
+        snapshot=None,
+        revocation_fetchers: RevocationFetchers | None = None,
+        ksi_runner: KsiToolRunner | None = None,
+    ):
         cache = TrustListCache()
         if snapshot is not None:
             # Test-only seeding: there's no real (signed, ETSI-schema) XML
@@ -78,6 +83,7 @@ def app_factory():
         app = create_app(
             trust_list_cache=cache,
             revocation_fetchers=revocation_fetchers,
+            ksi_runner=ksi_runner,
             start_background_refresh=False,
         )
         client = TestClient(app)
