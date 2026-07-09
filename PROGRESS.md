@@ -1303,6 +1303,139 @@ them:
 the two above -- no longer present on disk; its `.gitignore` entry is
 harmless to leave as-is.)
 
+## Fixed: overall verdict logic undercounted multi-item trust
+
+**The bug, as reported**: documents with multiple independently-valid
+signatures/seals were reported `PARTIAL` when they should be `TRUSTED` --
+specifically (1) a valid QES + a valid KSI seal, and (2) multiple valid
+qualified signatures.
+
+**Verified empirically before touching anything** (per instruction --
+this is core, plan the rule first): built both scenarios for real and
+confirmed two *distinct* root causes, not one:
+
+1. `_KSI_TIER_VERDICT_REASON` mapped *even the strongest* KSI tier
+   (`PUBLICATION_VERIFIED`) to `NOT_QUALIFIED`, and `_overall_verdict`
+   only awarded `TRUSTED` when literally every item was
+   `CONFIRMED_QUALIFIED` -- a KSI seal structurally can never earn that
+   label (correctly; Guardtime isn't eIDAS-qualified), so it could never
+   contribute to `TRUSTED` no matter how well verified. This is the
+   aggregation bug as originally understood.
+2. A **second, deeper bug**, discovered while building a real
+   multi-signer test case: any genuine two-signer PDF has its earlier
+   signer(s) misclassified as `TAMPERED`, regardless of the aggregation
+   rule. pyHanko's diff-analysis engine correctly classifies a second
+   party validly co-signing as `ModificationLevel.FORM_FILLING` ("filling
+   in a form field, or adding/modifying a digital signature" -- a real,
+   standards-recognized permission level, distinct from `ANNOTATIONS`/
+   `OTHER`), but `_modification_status` only ever excused `NONE` and
+   `LTA_UPDATES` from counting as tampering. Fixing only the aggregation
+   layer could not have made "two valid QES -> TRUSTED" true against a
+   real PDF -- confirmed by reproducing it, not by inspection alone.
+
+### Decision table (agreed before implementation)
+
+| Item | State | Old reason | Counted toward `TRUSTED`? | New reason | Counts now? |
+|---|---|---|---|---|---|
+| X.509 sig/seal | qualified, intact, TL-trusted, revocation good | `CONFIRMED_QUALIFIED` | yes | unchanged | yes |
+| X.509 sig/seal | qualified claim, TL/revocation unavailable | `UNCONFIRMED` | no | unchanged | no (honest gap) |
+| X.509 sig/seal | advanced only, no qualified claim | `NOT_QUALIFIED` | no | unchanged -- **out of scope** | no |
+| X.509 sig/seal | broken / tampered / revoked / untrusted | issue reasons | no | unchanged | no |
+| KSI seal | `BROKEN` tier | `BROKEN` | no | unchanged | no |
+| KSI seal | `NOT_VERIFIED` tier | `UNCONFIRMED` | no | unchanged | no |
+| KSI seal | `INTERNAL_ONLY` tier | `UNCONFIRMED` | no | **unchanged, by design** | no |
+| KSI seal | `CALENDAR_VERIFIED` tier | `NOT_QUALIFIED` | no (bug) | new: `CONFIRMED_INDEPENDENT` | yes |
+| KSI seal | `PUBLICATION_VERIFIED` tier | `NOT_QUALIFIED` | no (bug) | new: `CONFIRMED_INDEPENDENT` | yes |
+
+New rule: **`TRUSTED` iff every counted item's reason is
+`CONFIRMED_QUALIFIED` or `CONFIRMED_INDEPENDENT`.** Everything else about
+`_overall_verdict` (`NOT_TRUSTED` when every item is an issue, `PARTIAL`
+otherwise) is unchanged.
+
+**The `INTERNAL_ONLY` call, made explicitly rather than by default**:
+stays `UNCONFIRMED`, not trusted. It means *neither* independent check
+(key-based or publication-based) reached a conclusive answer -- the token
+is self-consistent, but nothing outside it corroborates that, the same
+honest gap as a certificate whose Trusted List status is unavailable.
+Treating bare self-consistency as "trusted" would let any
+internally-coherent token -- including a forged one with no real
+anchoring -- carry a verdict to green. Real cost of this call, stated
+plainly: `ksi_sample.pdf`, the one real-world KSI document tested so far,
+currently lands on `INTERNAL_ONLY` in every environment tested (the
+GlobalSign trust-chain gap blocks both stronger tiers universally right
+now) -- so no real KSI seal tested to date can currently reach `TRUSTED`.
+That's judged to be the honest outcome given the actual state of the
+world, not a reason to lower the bar.
+
+**Two forks surfaced and resolved before coding** (both: yes, per
+explicit confirmation):
+
+- Extend `_modification_status` to also excuse `FORM_FILLING` from
+  tampering (needed for case 2's test to pass honestly against a real
+  PDF -- accepted, since the alternative was leaving a confirmed, real bug
+  in tamper classification untouched purely to keep this fix's diff
+  smaller).
+- A KSI-only document (no X.509 item at all) *can* reach `TRUSTED` on its
+  own -- a `PUBLICATION_VERIFIED`/`CALENDAR_VERIFIED` seal is a conclusive
+  positive result and isn't held to "must also have a QES". The wording
+  must make the distinction unmistakable regardless (see below).
+
+### Implementation
+
+- **`VerdictReason.CONFIRMED_INDEPENDENT`** (new): "intact and
+  independently confirmed by a trust mechanism outside the eIDAS/EU-TL
+  model entirely" -- counts toward `TRUSTED` the same way
+  `CONFIRMED_QUALIFIED` does, but must never be described as "qualified".
+- **`VerdictBreakdown.confirmed_independent`** (new field, mirrored in
+  `api/schemas.py`'s `VerdictBreakdownOut`) -- purely additive; no
+  existing field renamed or removed.
+- **`_modification_status`**: `ModificationLevel.FORM_FILLING` now maps to
+  `(modified_after_signing=False, lta_extended=False)`. `ANNOTATIONS`/
+  `OTHER` are unaffected -- still conservative.
+- **`_plain_summary`**: three-way-aware now, not two-way.
+  "Trusted"/"qualified" are kept as distinct claims throughout:
+  - All trusted items are `CONFIRMED_QUALIFIED` -> unchanged wording,
+    e.g. `"Fully trusted — all 2 signatures are qualified and intact."`
+  - All trusted items are `CONFIRMED_INDEPENDENT` (KSI-only) -> no
+    `"Fully"`, no `"qualified"` anywhere:
+    `"Trusted — integrity independently verified against a publicly
+    witnessed record."` (descriptor varies by tier -- see
+    `_ksi_independent_descriptor`: `"against a publicly witnessed
+    record"` for `PUBLICATION_VERIFIED`, `"against the sealing
+    infrastructure's own signing certificate"` for `CALENDAR_VERIFIED`,
+    a bare `"independently verified"` if a document somehow mixes both).
+  - A genuine mix -> named separately, never lumped:
+    `"Fully trusted — 1 of 2 items is qualified and intact; 1 is
+    independently verified against a publicly witnessed record."`
+  - The existing `PARTIAL` "no issues, nothing unconfirmed" branch also
+    gained a three-way-aware variant for when `CONFIRMED_INDEPENDENT`
+    and `NOT_QUALIFIED` items coexist without any qualified/issue/
+    unconfirmed items at all; the original two-way wording is preserved
+    byte-for-byte when no KSI item is in the mix (verified via the
+    pre-existing tests, unchanged).
+- Two **pre-existing tests were re-grounded, not just updated**: both
+  had been (unknowingly) asserting the `FORM_FILLING` bug's own symptom
+  as expected behavior. `test_two_signatures_one_with_an_issue_is_partial_with_correct_counts`
+  now tampers *between* two co-signatures (a real, still-genuine "one
+  clean + one broken" case) instead of relying on co-signing alone to
+  produce an "issue". `test_multi_signer_pdf_reports_both_signers_with_mixed_outcomes`
+  (from the Day 7 fixture work) now asserts both signers read clean,
+  distinguished instead by qualification/confirmation, not integrity.
+- 6 new tests in `test_verdict.py` lock in the decision table: two valid
+  co-signers -> `TRUSTED`; QES + `PUBLICATION_VERIFIED` KSI -> `TRUSTED`
+  with mixed wording; KSI-only `PUBLICATION_VERIFIED` -> `TRUSTED` with
+  the no-"qualified" wording; QES + `CALENDAR_VERIFIED` KSI -> `TRUSTED`
+  with the certificate-specific wording; QES + `INTERNAL_ONLY` KSI ->
+  stays `PARTIAL` (the explicit decision-table call, locked in); three
+  items (2 valid + 1 genuinely broken) -> `PARTIAL` with the correct
+  count. 107/107 across `core/` + `api/` combined (was 101).
+- Not touched this pass: the frontend's `itemTone`/`itemBadge` switches
+  (`web/src/itemPresentation.js`) have no dedicated case for
+  `confirmed_independent` yet -- it currently falls through to the
+  existing neutral default ("Valid, not qualified" badge), which still
+  reads honestly, just not with a dedicated label. A v2 candidate, not a
+  correctness bug.
+
 ## Next: Day 7 -- polish, continued
 
 1. Review the new KSI card design on the live Railway URL against a

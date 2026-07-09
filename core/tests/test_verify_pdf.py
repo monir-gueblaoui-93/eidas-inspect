@@ -7,6 +7,7 @@ from eidas_inspect_core import (
     SignatureType,
     TrustChainStatus,
     SignatureLevel,
+    VerdictReason,
     VerificationVerdict,
     verify_pdf,
 )
@@ -129,15 +130,21 @@ def test_multi_signer_pdf_reports_both_signers_with_mixed_outcomes(multi_signer_
     alice_item = next(i for i in result.items if i.signer_name == 'Alice Natural Person')
     bob_item = next(i for i in result.items if i.signer_name == 'Bob')
 
-    # Alice's certificate declares a qualified signature, but her (earlier)
-    # revision is conservatively flagged once Bob co-signs over it.
+    # Alice's certificate declares a qualified signature; Bob co-signing
+    # afterward is a legitimate FORM_FILLING-level update, not tampering,
+    # so her (earlier) revision reads clean too. No trust_list is passed
+    # here, so her qualified *claim* can't be confirmed -- unconfirmed,
+    # not an issue, and a genuinely different "mixed" outcome than
+    # integrity: level/confirmation, not tamper detection.
     assert alice_item.level == SignatureLevel.QUALIFIED
-    assert alice_item.integrity.modified_after_signing is True
+    assert alice_item.integrity.modified_after_signing is False
+    assert alice_item.verdict_reason == VerdictReason.UNCONFIRMED
 
     # Bob's (the last) revision is clean, but his plain certificate never
     # claimed qualified in the first place.
     assert bob_item.level == SignatureLevel.ADVANCED
     assert bob_item.integrity.modified_after_signing is False
+    assert bob_item.verdict_reason == VerdictReason.NOT_QUALIFIED
 
     assert result.verdict == VerificationVerdict.PARTIAL
     assert result.verdict_breakdown.total == 2

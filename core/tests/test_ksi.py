@@ -156,7 +156,7 @@ def test_publication_verified_when_both_checks_pass():
 
     item = result.items[0]
     assert item.ksi_verification_tier == KsiVerificationTier.PUBLICATION_VERIFIED
-    assert item.verdict_reason == VerdictReason.NOT_QUALIFIED
+    assert item.verdict_reason == VerdictReason.CONFIRMED_INDEPENDENT
     assert 'independently verifiable' in item.plain_explanation.lower()
     assert item.ksi_aggregation_time is not None
     assert item.ksi_identity_chain == ('GT:anon:1',)
@@ -190,7 +190,7 @@ def test_calendar_verified_when_key_based_check_passes():
 
     item = result.items[0]
     assert item.ksi_verification_tier == KsiVerificationTier.CALENDAR_VERIFIED
-    assert item.verdict_reason == VerdictReason.NOT_QUALIFIED
+    assert item.verdict_reason == VerdictReason.CONFIRMED_INDEPENDENT
     assert 'signing certificate' in item.plain_explanation.lower()
 
 

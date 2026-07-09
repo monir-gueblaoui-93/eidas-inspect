@@ -155,19 +155,30 @@ def _collect_ksi_seals(reader: PdfFileReader) -> list[tuple[str, object]]:
 _KSI_TIER_VERDICT_REASON = {
     KsiVerificationTier.NOT_VERIFIED: VerdictReason.UNCONFIRMED,
     KsiVerificationTier.INTERNAL_ONLY: VerdictReason.UNCONFIRMED,
-    KsiVerificationTier.CALENDAR_VERIFIED: VerdictReason.NOT_QUALIFIED,
-    KsiVerificationTier.PUBLICATION_VERIFIED: VerdictReason.NOT_QUALIFIED,
+    KsiVerificationTier.CALENDAR_VERIFIED: VerdictReason.CONFIRMED_INDEPENDENT,
+    KsiVerificationTier.PUBLICATION_VERIFIED: VerdictReason.CONFIRMED_INDEPENDENT,
     KsiVerificationTier.BROKEN: VerdictReason.BROKEN,
 }
-"""Maps each tier onto the existing four-bucket VerdictReason model.
-Reuses NOT_QUALIFIED's bucket for both KSI-verified tiers -- imprecise
-(its usual banner text, "valid but not qualified", doesn't distinguish a
-publicly-witnessed KSI seal from an ordinary advanced X.509 signature),
-but a dedicated bucket would ripple into VerdictBreakdown, the API
-schema, and the already-shipped frontend verdict banner. Deferred to the
-point-in-time-wording checkpoint, which touches this same area anyway.
-The full nuance is never lost in the meantime -- it's always available on
-the item itself via ``ksi_verification_tier``."""
+"""Maps each tier onto VerdictReason.
+
+``CALENDAR_VERIFIED``/``PUBLICATION_VERIFIED`` map to
+``CONFIRMED_INDEPENDENT``, not ``CONFIRMED_QUALIFIED``: both represent a
+real, independently-reached positive result (a cryptographic check
+outside the seal's own self-consistency actually passed), but KSI makes
+no eIDAS-qualification claim at all, so it must never share
+``CONFIRMED_QUALIFIED``'s bucket. ``CONFIRMED_INDEPENDENT`` still counts
+toward an overall ``TRUSTED`` verdict (see ``_overall_verdict``) -- a
+well-verified KSI seal is a genuine positive result on its own terms,
+just not a "qualified" one.
+
+``INTERNAL_ONLY`` deliberately stays ``UNCONFIRMED``, not
+``CONFIRMED_INDEPENDENT``: it means neither the key-based nor the
+publication-based check reached a conclusive answer, so nothing outside
+the token's own self-consistency has corroborated it -- the same honest
+gap as a certificate whose Trusted List status is unavailable. Treating
+bare self-consistency as "trusted" would let any internally-coherent
+token (including a forged one with no real anchoring) carry a verdict to
+green."""
 
 _KSI_TIER_PLAIN_TEXT = {
     KsiVerificationTier.NOT_VERIFIED: (
@@ -938,10 +949,20 @@ def _modification_status(
 ) -> tuple[bool | None, bool]:
     """Map pyHanko's modification level to (modified_after_signing, lta_extended).
 
-    Only permissible PAdES long-term-archival additions (a document
-    timestamp or DSS update) are excluded from ``modified_after_signing``;
-    form-filling, annotations, and anything else fall back conservatively
-    to "modified" until this classifier is refined further.
+    Permissible PAdES long-term-archival additions (a document timestamp or
+    DSS update) are excluded from ``modified_after_signing``, and so is
+    ``FORM_FILLING`` -- pyHanko's own label for "filling in a form field, or
+    adding/modifying a digital signature", which is exactly what a second,
+    legitimate party co-signing (or counter-sealing) an already-signed
+    document looks like. Without this, any real multi-signature PDF would
+    have every signature but the very last one misreported as tampered,
+    purely because someone else validly signed afterwards -- a real bug,
+    not a hypothetical: confirmed empirically against a genuine two-signer
+    PDF before this exclusion was added (see PROGRESS.md).
+
+    Annotations and anything else (``OTHER``) still fall back
+    conservatively to "modified" -- unlike form-filling/signing, those
+    aren't a standards-recognized, narrowly-scoped permission level.
     """
     if modification_level is None:
         return None, False
@@ -949,6 +970,8 @@ def _modification_status(
         return False, False
     if modification_level is ModificationLevel.LTA_UPDATES:
         return False, True
+    if modification_level is ModificationLevel.FORM_FILLING:
+        return False, False
     return True, False
 
 
@@ -1181,12 +1204,21 @@ def _overall_verdict(
 
     reasons = [i.verdict_reason for i in counted_items]
     total = len(counted_items)
-    confirmed = reasons.count(VerdictReason.CONFIRMED_QUALIFIED)
+    confirmed_qualified = reasons.count(VerdictReason.CONFIRMED_QUALIFIED)
+    confirmed_independent = reasons.count(VerdictReason.CONFIRMED_INDEPENDENT)
+    trusted_count = confirmed_qualified + confirmed_independent
     issues = sum(1 for r in reasons if r in _ISSUE_REASONS)
     unconfirmed = reasons.count(VerdictReason.UNCONFIRMED)
     not_qualified = reasons.count(VerdictReason.NOT_QUALIFIED)
 
-    if confirmed == total:
+    # TRUSTED requires every item to be independently trustworthy on its
+    # own terms -- CONFIRMED_QUALIFIED (eIDAS-qualified and confirmed) or
+    # CONFIRMED_INDEPENDENT (a real positive result via a different trust
+    # mechanism, e.g. a well-verified KSI seal) -- never merely "more than
+    # one item". A single NOT_QUALIFIED item (an ordinary advanced
+    # signature/seal that doesn't claim eIDAS qualification at all) still
+    # caps the document at PARTIAL, same as always.
+    if trusted_count == total:
         verdict = VerificationVerdict.TRUSTED
     elif issues == total:
         verdict = VerificationVerdict.NOT_TRUSTED
@@ -1195,7 +1227,8 @@ def _overall_verdict(
 
     breakdown = VerdictBreakdown(
         total=total,
-        confirmed_qualified=confirmed,
+        confirmed_qualified=confirmed_qualified,
+        confirmed_independent=confirmed_independent,
         issues=issues,
         unconfirmed=unconfirmed,
         not_qualified=not_qualified,
@@ -1214,6 +1247,27 @@ def _items_noun(items: list[SignatureItem]) -> str:
     return singular if len(items) == 1 else f'{singular}s'
 
 
+def _ksi_independent_descriptor(items: list[SignatureItem]) -> str:
+    """A short clause describing *how* the CONFIRMED_INDEPENDENT items in
+    this document were independently confirmed -- e.g. "against a publicly
+    witnessed record" for PUBLICATION_VERIFIED, a meaningfully stronger
+    claim than CALENDAR_VERIFIED's "against the sealing infrastructure's
+    own signing certificate". Picking one specific, accurate clause (rather
+    than a vague "somehow") when every such item reached the *same* tier;
+    falling back to a bare, still-true-for-both "independently" when the
+    tiers are mixed, rather than overclaiming the stronger one."""
+    tiers = {
+        i.ksi_verification_tier
+        for i in items
+        if i.verdict_reason is VerdictReason.CONFIRMED_INDEPENDENT
+    }
+    if tiers == {KsiVerificationTier.PUBLICATION_VERIFIED}:
+        return ' against a publicly witnessed record'
+    if tiers == {KsiVerificationTier.CALENDAR_VERIFIED}:
+        return " against the sealing infrastructure's own signing certificate"
+    return ''
+
+
 def _plain_summary(
     verdict: VerificationVerdict,
     items: list[SignatureItem],
@@ -1222,14 +1276,39 @@ def _plain_summary(
     """Document-level banner text. Distinguishes real "issues" (tampering,
     revocation, confirmed not-trusted) from an honest "unconfirmed" gap
     (degraded Trusted List / unavailable revocation) -- these are different
-    messages, not variations on the same one, per the PRD."""
+    messages, not variations on the same one, per the PRD.
+
+    "Trusted" and "qualified" are different claims: a CONFIRMED_INDEPENDENT
+    item (a well-verified KSI seal) is genuinely trusted, but never
+    eIDAS-qualified, and the wording below never conflates the two -- it
+    only ever says "qualified" about items that actually are."""
     noun = _items_noun(items)
     total = breakdown.total
 
     if verdict is VerificationVerdict.TRUSTED:
-        if total == 1:
-            return f"Fully trusted — the {noun} is qualified and intact."
-        return f"Fully trusted — all {total} {noun} are qualified and intact."
+        if breakdown.confirmed_independent == 0:
+            # Every trusted item here is eIDAS-qualified -- the original,
+            # unchanged wording.
+            if total == 1:
+                return f"Fully trusted — the {noun} is qualified and intact."
+            return f"Fully trusted — all {total} {noun} are qualified and intact."
+        descriptor = _ksi_independent_descriptor(items)
+        if breakdown.confirmed_qualified == 0:
+            # Nothing here claims eIDAS qualification at all (e.g. a
+            # KSI-only document) -- deliberately no "Fully" and no
+            # "qualified": this is a real, positive result, just a
+            # different claim than eIDAS qualification.
+            return f"Trusted — integrity independently verified{descriptor}."
+        # A genuine mix: some items are eIDAS-qualified, some are
+        # independently confirmed through a different mechanism. Named
+        # separately rather than lumped under one blanket "qualified".
+        return (
+            f"Fully trusted — {breakdown.confirmed_qualified} of {total} {noun} "
+            f"{'is' if breakdown.confirmed_qualified == 1 else 'are'} qualified and "
+            f"intact; {breakdown.confirmed_independent} "
+            f"{'is' if breakdown.confirmed_independent == 1 else 'are'} independently "
+            f"verified{descriptor}."
+        )
 
     if verdict is VerificationVerdict.NOT_TRUSTED:
         return "Do not rely on this document."
@@ -1244,14 +1323,25 @@ def _plain_summary(
             "Partially trusted — qualified status could not be confirmed "
             f"right now for {breakdown.unconfirmed} of {total} {noun}."
         )
-    # No issues, nothing unconfirmed -- everything here is simply valid but
-    # not qualified (e.g. an ordinary advanced signature). A known fact, not
-    # a problem or an uncertainty.
+    # No issues, nothing unconfirmed -- everything remaining is either
+    # CONFIRMED_INDEPENDENT or simply valid but not qualified (e.g. an
+    # ordinary advanced signature). A known fact, not a problem or an
+    # uncertainty. (Reached only when NOT_QUALIFIED > 0: if every item were
+    # CONFIRMED_QUALIFIED/CONFIRMED_INDEPENDENT, trusted_count == total and
+    # the verdict would already be TRUSTED, not PARTIAL.)
     if total == 1:
         return f"Partially trusted — the {noun} is valid but not qualified."
-    qualified_count = breakdown.confirmed_qualified
+    if breakdown.confirmed_independent == 0:
+        # Original two-way wording, unchanged.
+        qualified_count = breakdown.confirmed_qualified
+        return (
+            f"Partially trusted — {qualified_count} of {total} {noun} "
+            f"{'is' if qualified_count == 1 else 'are'} qualified; the rest are "
+            "valid but not qualified."
+        )
+    trusted_count = breakdown.confirmed_qualified + breakdown.confirmed_independent
     return (
-        f"Partially trusted — {qualified_count} of {total} {noun} "
-        f"{'is' if qualified_count == 1 else 'are'} qualified; the rest are "
-        "valid but not qualified."
+        f"Partially trusted — {trusted_count} of {total} {noun} "
+        f"{'is' if trusted_count == 1 else 'are'} confirmed; the rest "
+        f"{'is' if breakdown.not_qualified == 1 else 'are'} valid but not qualified."
     )

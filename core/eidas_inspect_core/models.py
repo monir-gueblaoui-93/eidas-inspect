@@ -121,6 +121,15 @@ class VerdictReason(StrEnum):
     """Intact, valid, not tampered, not revoked, qualified, and the issuer
     is confirmed on the EU Trusted List. The "fully green" case."""
 
+    CONFIRMED_INDEPENDENT = 'confirmed_independent'
+    """Intact and independently confirmed by a trust mechanism outside the
+    eIDAS/EU-Trusted-List model entirely (currently: a KSI seal that
+    reached ``CALENDAR_VERIFIED`` or ``PUBLICATION_VERIFIED``) -- a real,
+    positive result, but never eIDAS-*qualified*, since that's not a claim
+    this trust mechanism makes. Counts toward :attr:`VerificationVerdict.TRUSTED`
+    the same way :attr:`CONFIRMED_QUALIFIED` does, but must never be
+    described as "qualified" in any plain-language wording."""
+
     BROKEN = 'broken'
     """Cryptographic integrity failed (bad digest or signature)."""
 
@@ -155,6 +164,7 @@ class VerdictBreakdown:
 
     total: int
     confirmed_qualified: int
+    confirmed_independent: int
     issues: int
     unconfirmed: int
     not_qualified: int
