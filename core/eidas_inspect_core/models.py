@@ -14,6 +14,50 @@ class SignatureType(StrEnum):
     SIGNATURE = 'signature'
     SEAL = 'seal'
     TIMESTAMP = 'timestamp'
+    KSI_SEAL = 'ksi_seal'
+    """A Guardtime KSI (Keyless Signature Infrastructure) seal: a
+    hash-chain-based seal embedded as a non-standard PDF ``/FT /KSI``
+    AcroForm field, not an X.509/CMS signature at all. No certificate, no
+    qcStatements, and no classic EU Trusted List chain applies -- see
+    :class:`KsiVerificationTier` for its own, separate trust model."""
+
+
+class KsiVerificationTier(StrEnum):
+    """How far independent verification of a :attr:`SignatureType.KSI_SEAL`
+    item could get, per Guardtime's own verification-policy hierarchy
+    (internal -> key-based -> publication-based -> calendar-based).
+
+    Calendar-based verification -- checking directly against Guardtime's
+    live calendar/extender service -- requires an authenticated account and
+    is deliberately not represented here at all: out of scope for an
+    anonymous public tool. See PROGRESS.md's KSI research notes for the
+    full reasoning.
+    """
+
+    NOT_VERIFIED = 'not_verified'
+    """Detected and structurally parsed; cryptographic verification has not
+    been attempted (yet -- e.g. before the verification-tiers phase of this
+    feature is implemented)."""
+
+    BROKEN = 'broken'
+    """Internal consistency check failed -- the hash chain doesn't add up,
+    or the document hash doesn't match what the seal covers."""
+
+    INTERNAL_ONLY = 'internal_only'
+    """Internally consistent, but nothing beyond that could be
+    independently confirmed right now -- confirming further would require
+    the sealing provider's live (account-gated) service."""
+
+    CALENDAR_VERIFIED = 'calendar_verified'
+    """Internally consistent, and its calendar authentication record checks
+    out against the sealing infrastructure's own published signing
+    certificate (via the publicly downloadable publications file) --
+    PKI-backed, but not yet anchored to a publicly witnessed record."""
+
+    PUBLICATION_VERIFIED = 'publication_verified'
+    """Extended to a publication and independently verified against the
+    publicly published record -- verifiable without trusting any single
+    party's key. The strongest case."""
 
 
 class SignatureLevel(StrEnum):
@@ -220,6 +264,25 @@ class SignatureItem:
     verdict_reason: VerdictReason = VerdictReason.NOT_QUALIFIED
     certificate: CertificateDetails | None = None
     trust_match: TrustMatch | None = None
+
+    # -- KSI-specific fields (see SignatureType.KSI_SEAL/KsiVerificationTier).
+    # Only meaningful when type is KSI_SEAL; None on every other item type.
+    #
+    # v2 candidate: these are bolted onto the generic SignatureItem rather
+    # than a dedicated KSISealItem dataclass, since KSI seals reuse most of
+    # the existing card UI (type, plain_explanation, technical_detail,
+    # verdict_reason) and a parallel model wasn't worth the duplication for
+    # v1. If KSI grows more fields, a proper KSISealItem (or a tagged union)
+    # becomes the better shape.
+    ksi_verification_tier: KsiVerificationTier | None = None
+    ksi_aggregation_time: datetime | None = None
+    """When this KSI seal was aggregated, per its own hash chain -- a
+    cryptographically derived fact, not a claimed time."""
+    ksi_identity_chain: tuple[str, ...] | None = None
+    """The KSI aggregation hierarchy's identity labels (e.g.
+    ``('GT', 'some-gateway', 'client-id')``) -- a chain of string labels
+    assigned by whoever configured the signing infrastructure. Not an
+    X.509 subject/issuer; KSI has no certificate for the seal itself."""
 
 
 @dataclass(frozen=True)

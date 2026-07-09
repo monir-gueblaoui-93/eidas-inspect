@@ -8,6 +8,7 @@ from pyhanko.pdf_utils.crypt.api import AuthStatus
 from pyhanko.pdf_utils.misc import PdfError
 from pyhanko.pdf_utils.reader import PdfFileReader
 from pyhanko.sign.diff_analysis import ModificationLevel
+from pyhanko.sign.fields import enumerate_fields_in
 from pyhanko.sign.validation.pdf_embedded import (
     EmbeddedPdfSignature,
     async_validate_pdf_signature,
@@ -26,6 +27,7 @@ from .errors import CorruptedPdfError, IncorrectPasswordError, PasswordRequiredE
 from .models import (
     CertificateDetails,
     IntegrityStatus,
+    KsiVerificationTier,
     RevocationSource,
     RevocationStatus,
     SignatureItem,
@@ -62,8 +64,13 @@ def verify_pdf(
 
     reader = _open_reader(data, password)
     embedded_sigs = collect_embedded_signatures(reader)
+    # KSI seals are embedded as a non-standard /FT /KSI AcroForm field, not
+    # /FT /Sig -- collect_embedded_signatures() never sees them (that's
+    # exactly the bug this discovery path fixes: a KSI-sealed document used
+    # to silently report NO_SIGNATURES). See _collect_ksi_seals.
+    ksi_seals = _collect_ksi_seals(reader)
 
-    if not embedded_sigs:
+    if not embedded_sigs and not ksi_seals:
         return VerificationResult(
             verdict=VerificationVerdict.NO_SIGNATURES,
             items=[],
@@ -88,6 +95,9 @@ def verify_pdf(
             verified_at,
         )
         for sig in embedded_sigs
+    ] + [
+        _build_ksi_seal_item(data, field_name, sig_dict)
+        for field_name, sig_dict in ksi_seals
     ]
     verdict, plain_summary, breakdown = _overall_verdict(items)
     return VerificationResult(
@@ -97,6 +107,129 @@ def verify_pdf(
         verified_at=verified_at,
         plain_summary=plain_summary,
         verdict_breakdown=breakdown,
+    )
+
+
+def _collect_ksi_seals(reader: PdfFileReader) -> list[tuple[str, object]]:
+    """Find every Guardtime-KSI-style ``/FT /KSI`` AcroForm field in the
+    document.
+
+    Confirmed by inspecting Guardtime's own official demo file
+    (github.com/guardtime/ksi-pdf-verifier's ``demo/signed.pdf``): a KSI
+    seal is a ``/Subtype /Widget`` annotation whose field type is the
+    non-standard literal ``/KSI``, not ``/Sig`` -- which is exactly why
+    :func:`~pyhanko.sign.validation.pdf_embedded.collect_embedded_signatures`
+    (filters strictly on ``/FT /Sig``) never finds one. Reuses pyHanko's own
+    field-walking primitive (handles ``/Kids`` recursion, circular-reference
+    detection, inheritable ``/FT``) with a different ``target_field_type``
+    rather than reimplementing AcroForm traversal.
+
+    Returns ``(field_name, signature_dict)`` pairs, where ``signature_dict``
+    is the field's ``/V`` target -- a dictionary carrying ``/Contents``
+    (the raw KSI signature, TLV-binary, hex-encoded the same way a CMS
+    blob would be), ``/Filter`` (``/GT.KSI``), and a standard 4-element
+    ``/ByteRange``.
+    """
+    try:
+        fields = reader.root['/AcroForm']['/Fields']
+    except KeyError:
+        return []
+
+    results = []
+    for field_name, field_value, _field_ref in enumerate_fields_in(
+        fields, filled_status=True, refs_seen=set(), target_field_type='/KSI'
+    ):
+        sig_dict = (
+            field_value.get_object()
+            if hasattr(field_value, 'get_object')
+            else field_value
+        )
+        results.append((field_name, sig_dict))
+    return results
+
+
+def _build_ksi_seal_item(data: bytes, field_name: str, sig_dict) -> SignatureItem:
+    """Detection + structural parsing only, for now.
+
+    No cryptographic verification is performed here yet -- that's the
+    verification-tiers phase of this feature (subprocess to ``ksi-tool``;
+    see PROGRESS.md's KSI research notes), which will populate
+    :attr:`~.models.KsiVerificationTier` properly. Until then, every
+    structurally well-formed KSI seal gets
+    :attr:`~.models.KsiVerificationTier.NOT_VERIFIED`, mapped to
+    :attr:`~.models.VerdictReason.UNCONFIRMED` -- not because it fits that
+    reason's usual TL-or-revocation-gap story, but because the resulting
+    banner text ("qualified status could not be confirmed right now") is
+    the honest one; :attr:`~.models.VerdictReason.NOT_QUALIFIED`'s text
+    ("valid but not qualified") would overclaim a validity we haven't
+    actually checked yet.
+
+    ``IntegrityStatus.intact``/``.signature_valid`` are booleans with no
+    "not yet checked" state to hold, unlike ``RevocationStatus.NOT_CHECKED``
+    elsewhere in this module -- they're set ``True`` here only because
+    ``False`` would be actively wrong (it reads as "a problem was found",
+    not "unknown"), not because cryptographic validity was confirmed. The
+    UI must drive tone/badges for KSI items from ``ksi_verification_tier``,
+    never from these two fields.
+    """
+    try:
+        contents = sig_dict['/Contents']
+        byte_range_obj = sig_dict['/ByteRange']
+        signature_bytes = bytes(contents)
+        byte_range = [int(n) for n in byte_range_obj]
+        if len(byte_range) != 4:
+            raise ValueError(
+                f'expected a 4-element /ByteRange, got {len(byte_range)}'
+            )
+    except Exception as e:
+        return _unreadable_ksi_seal_item(e)
+
+    fully_covered = (byte_range[2] + byte_range[3]) == len(data)
+    integrity = IntegrityStatus(
+        intact=True,
+        signature_valid=True,
+        fully_covered=fully_covered,
+        modified_after_signing=None,
+        lta_extended=False,
+    )
+
+    plain = (
+        'This document carries a Guardtime KSI seal. This tool does not '
+        "yet perform independent cryptographic verification of KSI seals, "
+        'so its validity could not be confirmed.'
+    )
+    technical = (
+        f"KSI seal found in field '{field_name}' "
+        f'(Filter={sig_dict.get("/Filter")!r}, {len(signature_bytes)}-byte '
+        'token, ByteRange present). Cryptographic verification (internal '
+        'consistency, publication-based) is not yet implemented.'
+    )
+
+    return SignatureItem(
+        type=SignatureType.KSI_SEAL,
+        integrity=integrity,
+        plain_explanation=plain,
+        technical_detail=technical,
+        verdict_reason=VerdictReason.UNCONFIRMED,
+        ksi_verification_tier=KsiVerificationTier.NOT_VERIFIED,
+    )
+
+
+def _unreadable_ksi_seal_item(error: Exception) -> SignatureItem:
+    integrity = IntegrityStatus(
+        intact=False,
+        signature_valid=False,
+        fully_covered=False,
+        modified_after_signing=None,
+        lta_extended=False,
+    )
+    return SignatureItem(
+        type=SignatureType.KSI_SEAL,
+        integrity=integrity,
+        plain_explanation='This seal could not be read or validated.',
+        technical_detail=f'{type(error).__name__}: {error}',
+        verdict_reason=VerdictReason.BROKEN,
+        ksi_verification_tier=KsiVerificationTier.BROKEN,
     )
 
 
@@ -677,7 +810,7 @@ def _unreadable_signature_item(sig_type: SignatureType, error: Exception) -> Sig
 def _noun_for(sig_type: SignatureType) -> str:
     if sig_type is SignatureType.TIMESTAMP:
         return 'timestamp'
-    if sig_type is SignatureType.SEAL:
+    if sig_type is SignatureType.SEAL or sig_type is SignatureType.KSI_SEAL:
         return 'seal'
     return 'signature'
 
@@ -914,6 +1047,7 @@ def _items_noun(items: list[SignatureItem]) -> str:
         frozenset({SignatureType.SIGNATURE}): 'signature',
         frozenset({SignatureType.SEAL}): 'seal',
         frozenset({SignatureType.TIMESTAMP}): 'timestamp',
+        frozenset({SignatureType.KSI_SEAL}): 'seal',
     }.get(types, 'item')
     return singular if len(items) == 1 else f'{singular}s'
 

@@ -138,6 +138,106 @@ def sign_pdf_bytes(
     return out.getvalue()
 
 
+def build_ksi_sealed_pdf(
+    pdf_bytes: bytes,
+    *,
+    ksi_signature_der: bytes = b'\x00\x01KSI-TEST-PLACEHOLDER-TOKEN\x02\x03',
+    field_name: str = 'Signature1',
+    malformed: bool = False,
+) -> bytes:
+    """Add a Guardtime-KSI-style ``/FT /KSI`` AcroForm field to a PDF.
+
+    Mirrors the structure confirmed by inspecting Guardtime's own official
+    demo file (github.com/guardtime/ksi-pdf-verifier's ``demo/signed.pdf``):
+    a ``/Subtype /Widget`` annotation whose field type is the non-standard
+    literal ``/KSI`` (not ``/Sig``, which is exactly why pyHanko's own
+    ``collect_embedded_signatures`` never sees it), with ``/V`` pointing to
+    a dictionary carrying ``/Contents <hex>``, ``/Filter /GT.KSI``, and a
+    ``/ByteRange`` array.
+
+    ``ksi_signature_der`` is a synthetic placeholder, not a real KSI
+    signature token, and ``/ByteRange`` here is a plausible-shaped 4-tuple,
+    not byte-accurate -- this fixture is for testing *detection* (the field
+    is found at all, instead of the document silently reporting
+    ``NO_SIGNATURES``), not cryptographic verification. A byte-accurate,
+    real-token fixture is a separate, later concern once verification
+    tiers are implemented.
+    """
+    w = IncrementalPdfFileWriter(io.BytesIO(pdf_bytes), strict=False)
+
+    sig_dict_contents = {
+        generic.NameObject('/Filter'): generic.NameObject('/GT.KSI'),
+        generic.NameObject('/FT'): generic.NameObject('/DocTimeStamp'),
+        generic.NameObject('/Contents'): generic.ByteStringObject(ksi_signature_der),
+        generic.NameObject('/ByteRange'): generic.ArrayObject(
+            [
+                generic.NumberObject(0),
+                generic.NumberObject(len(pdf_bytes) // 2),
+                generic.NumberObject(len(pdf_bytes) // 2 + 1),
+                generic.NumberObject(len(pdf_bytes) // 2),
+            ]
+        ),
+    }
+    if malformed:
+        # Missing /ByteRange entirely -- exercises the "structurally
+        # broken KSI field" path rather than the "not yet verified" one.
+        del sig_dict_contents[generic.NameObject('/ByteRange')]
+    sig_dict = generic.DictionaryObject(sig_dict_contents)
+    sig_ref = w.add_object(sig_dict)
+
+    widget = generic.DictionaryObject(
+        {
+            generic.NameObject('/Type'): generic.NameObject('/Annot'),
+            generic.NameObject('/Subtype'): generic.NameObject('/Widget'),
+            generic.NameObject('/FT'): generic.NameObject('/KSI'),
+            generic.NameObject('/T'): generic.TextStringObject(field_name),
+            generic.NameObject('/V'): sig_ref,
+            generic.NameObject('/F'): generic.NumberObject(132),
+            generic.NameObject('/Rect'): generic.ArrayObject(
+                [generic.NumberObject(0)] * 4
+            ),
+        }
+    )
+    widget_ref = w.add_object(widget)
+
+    # Merge into any existing /AcroForm (e.g. an ordinary signature's own
+    # field) rather than clobbering it -- a real KSI seal coexists with
+    # other fields, and overwriting /AcroForm wholesale silently drops
+    # them from /Fields. /AcroForm is commonly its own indirect object (as
+    # pyHanko's own signer writes it), so mutating the dereferenced dict
+    # in place isn't picked up on write unless that specific object is
+    # also marked updated -- update_root() alone only marks the catalog.
+    try:
+        existing_acroform_ref = w.root.raw_get(generic.NameObject('/AcroForm'))
+    except KeyError:
+        existing_acroform_ref = None
+    if existing_acroform_ref is not None:
+        acroform = existing_acroform_ref.get_object()
+        fields = acroform.get(generic.NameObject('/Fields'))
+        if fields is None:
+            fields = generic.ArrayObject()
+            acroform[generic.NameObject('/Fields')] = fields
+        fields.append(widget_ref)
+        acroform[generic.NameObject('/SigFlags')] = generic.NumberObject(3)
+        if isinstance(existing_acroform_ref, generic.IndirectObject):
+            w.mark_update(existing_acroform_ref.reference)
+        else:
+            w.update_root()
+    else:
+        acroform = generic.DictionaryObject(
+            {
+                generic.NameObject('/SigFlags'): generic.NumberObject(3),
+                generic.NameObject('/Fields'): generic.ArrayObject([widget_ref]),
+            }
+        )
+        w.root[generic.NameObject('/AcroForm')] = acroform
+        w.update_root()
+
+    buf = io.BytesIO()
+    w.write(buf)
+    return buf.getvalue()
+
+
 def build_encrypted_pdf(password: str) -> bytes:
     w = PdfFileWriter()
     page = PageObject(contents=[], media_box=(0, 0, 200, 200))

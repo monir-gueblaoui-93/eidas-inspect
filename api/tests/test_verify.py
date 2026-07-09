@@ -1,5 +1,5 @@
 from api.config import settings
-from pdf_fixtures import build_minimal_pdf
+from pdf_fixtures import build_ksi_sealed_pdf, build_minimal_pdf
 
 
 def test_verify_confirmed_qualified_signature_is_trusted(app_factory, qualified_pdf_and_snapshot):
@@ -43,6 +43,22 @@ def test_verify_plain_advanced_signature_has_certificate_but_no_trust_match(
     item = response.json()['items'][0]
     assert item['certificate'] is not None
     assert item['trust_match'] is None
+
+
+def test_verify_ksi_sealed_document_is_not_reported_as_no_signatures(app_factory):
+    client = app_factory()
+    pdf_bytes = build_ksi_sealed_pdf(build_minimal_pdf())
+
+    response = client.post(
+        '/api/verify', files={'file': ('doc.pdf', pdf_bytes, 'application/pdf')}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body['verdict'] != 'no-signatures'
+    item = body['items'][0]
+    assert item['type'] == 'ksi_seal'
+    assert item['ksi_verification_tier'] == 'not_verified'
 
 
 def test_verify_plain_advanced_signature_is_partial(app_factory, plain_signed_pdf):

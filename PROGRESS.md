@@ -867,6 +867,159 @@ required new structured facts from core, not just UI rearrangement --
   EU Trusted List -- full JSON shown to the user, `certificate` and
   `trust_match` populated exactly as designed, before commit.
 
+## New feature, in progress: KSI (Guardtime) seal support
+
+Support for verifying KSI-sealed documents (Guardtime Keyless Signature
+Infrastructure -- the sealing method Scrive and others used historically,
+before switching to PAdES). Researched first, plan approved, now being
+implemented checkpoint by checkpoint per that approval.
+
+### Research findings (full detail: session transcript; summarized here)
+
+- **Embedding, confirmed via Guardtime's own official
+  `ksi-pdf-verifier` source (Apache-2.0) and byte-level inspection of
+  their own demo file**: a KSI seal is a PDF AcroForm field, `/Subtype
+  /Widget`, whose field type is the **non-standard literal `/FT /KSI`**
+  (not `/Sig`) -- exactly why pyHanko's `collect_embedded_signatures()`
+  (filters strictly on `/FT /Sig`) never sees one, and why a KSI-sealed
+  document used to silently report `NO_SIGNATURES`. The field's `/V`
+  points to a dictionary with `/Contents <hex>` (the raw TLV-encoded KSI
+  token), `/Filter /GT.KSI`, and a standard 4-element `/ByteRange`.
+- **Tooling**: no viable Python-native KSI library exists.
+  `guardtime/ksi-python` (a thin C-binding wrapper) is explicitly
+  "Experimental, non-supported" per its own README, last released 2018,
+  and its GitHub source has since been deleted. The official C SDK
+  (`libksi`) and CLI (`ksi-tool`) are Apache-2.0 and actively maintained
+  (pushed 2024-07), with ready Debian/RHEL packages via Guardtime's own
+  APT/YUM repos. **Decision: subprocess to `ksi-tool` inside the
+  container for actual cryptographic verification** -- same philosophy as
+  never reimplementing PAdES/CMS ourselves and instead trusting pyHanko;
+  we do the PDF-container parsing (find the field, extract
+  `/ByteRange`+`/Contents`, hash), `ksi-tool` does all KSI-specific
+  verification.
+- **Verification tiers**, confirmed via Guardtime's own CLI man page and
+  SDK tutorial: **internal** (hash-chain shape only, always possible,
+  no external dependency) -> **key-based** (anonymous -- needs only the
+  publicly downloadable publications file, PKI-backed by Guardtime's
+  calendar-signing cert; a freshly-sealed *unextended* signature normally
+  already carries what this needs) -> **publication-based**/"extended"
+  (anonymous once extended -- verifiable against a publicly witnessed
+  record, no trust in any single party's key -- our strongest case) ->
+  **calendar-based** (requires a live, authenticated Guardtime account --
+  out of scope for an anonymous public tool).
+- **Critical finding, verified two independent ways**: Guardtime's own
+  EU eIDAS qualification (as a QTST on Estonia's trusted list) **was
+  withdrawn on 2025-06-12** -- confirmed both by Guardtime's own blog
+  announcement and by fetching the live LOTL/Estonia TL ourselves and
+  finding every one of Guardtime's 22 historical service entries at
+  `status=withdrawn`. **No EU Trusted List affirmation is honest for KSI
+  seals verified today**, regardless of extension status -- this
+  overturns the premise of an (now-stale) old Scrive blog post claiming
+  otherwise. Seals aggregated *before* the withdrawal date can still
+  honestly note they were qualified at the time (point-in-time wording,
+  this product's whole thesis) -- deriving that boundary from trusted-list
+  data turned out to need a small, targeted addition rather than reusing
+  `TrustListSnapshot`/`TSPRegistry` as-is: pyHanko's registry only
+  materializes *currently-granted* services (by design, for path-building
+  against certificates), and Guardtime's most recent (now-withdrawn)
+  history entry also lacks a bundled X.509 certificate, so it's invisible
+  to `known_timestamp_authorities` even when queried at a past moment.
+  The raw per-territory TL XML pyHanko already parses does carry the
+  needed `StatusStartingTime` transitions (confirmed by direct
+  inspection); the fix is to read them via pyHanko's lower-level
+  `eutl_parse.read_qualified_service_definitions()` generator directly,
+  filtered by provider name, bypassing the cert-keyed registry index
+  entirely for this one lookup -- deferred to the point-in-time-wording
+  checkpoint, not yet implemented.
+
+### Done: checkpoint 1 -- detection (the live bug fix)
+
+- **New discovery path** (`_collect_ksi_seals` in `verify.py`): walks
+  `/AcroForm/Fields` for `/FT /KSI` entries via pyHanko's own
+  `pyhanko.sign.fields.enumerate_fields_in(..., target_field_type='/KSI')`
+  -- reusing pyHanko's battle-tested field-walking (handles `/Kids`
+  recursion, circular-reference detection, inheritable `/FT`) with a
+  different target type, rather than reimplementing AcroForm traversal.
+  Runs alongside (never instead of) `collect_embedded_signatures()`;
+  `verify_pdf()` only returns `NO_SIGNATURES` when *both* come back empty.
+- **New model**: `SignatureType.KSI_SEAL` and `KsiVerificationTier`
+  (`NOT_VERIFIED` / `BROKEN` / `INTERNAL_ONLY` / `CALENDAR_VERIFIED` /
+  `PUBLICATION_VERIFIED` -- calendar-based/live-account verification
+  deliberately has no tier at all, per the tooling decision above). Three
+  new `ksi_*`-prefixed optional fields bolted onto the existing
+  `SignatureItem` (`ksi_verification_tier`, `ksi_aggregation_time`,
+  `ksi_identity_chain`) rather than a parallel dataclass -- reuses the
+  existing card UI for v1; a code comment on `SignatureItem` flags a
+  dedicated `KSISealItem` (or tagged union) as the v2 refactor if KSI
+  grows more fields.
+- **`_build_ksi_seal_item()`**: structural detection and parsing only --
+  confirms `/Contents`/`/ByteRange` are present and well-formed, computes
+  `fully_covered` honestly from whether `/ByteRange` reaches EOF. No
+  cryptographic verification yet, so every structurally sound seal gets
+  `ksi_verification_tier=NOT_VERIFIED`, mapped to
+  `VerdictReason.UNCONFIRMED` -- not because it fits that reason's usual
+  TL/revocation-gap story, but because its actual banner text ("qualified
+  status could not be confirmed right now") is honest for "not yet
+  checked", where `NOT_QUALIFIED`'s text ("valid but not qualified")
+  would overclaim a validity never actually checked.
+  `IntegrityStatus.intact`/`.signature_valid` (plain bools, no "unknown"
+  state available) are set `True` only because `False` would read as "a
+  problem was found" rather than "unknown" -- documented in code as a
+  real tension, with the instruction that any future UI work must drive
+  KSI tone/badges from `ksi_verification_tier`, never from these two
+  fields.
+- **Test fixture**: `build_ksi_sealed_pdf()` in `pdf_fixtures.py`, built
+  from the confirmed real structure (not guessed). Found and fixed a real
+  bug while writing it: naively overwriting `/AcroForm` wholesale silently
+  dropped an existing signature's own field entry when the two coexist in
+  one document; fixed to merge into the existing `/AcroForm`/`/Fields`,
+  discovering along the way that `/AcroForm` is commonly its own indirect
+  object (as pyHanko's signer writes it) requiring an explicit
+  `mark_update` on that object, not just `update_root()`.
+- **5 new core tests + 1 new API test**: detection fixes `NO_SIGNATURES`;
+  item fields are as documented; a malformed `/FT /KSI` field (missing
+  `/ByteRange`) is reported `BROKEN`, not silently ignored or
+  misreported as fine; a KSI seal coexists correctly alongside an
+  ordinary signature in the same document (both items present); the
+  plain-unsigned-PDF case is unaffected (regression guard). API schema
+  updated so the three new `ksi_*` fields round-trip through the JSON
+  envelope, keeping the "schema mirrors core exactly" contract intact.
+  80/80 across `core/` + `api/`.
+
+### Next for this feature
+
+1. **Verification tiers via `ksi-tool` subprocess**: internal-consistency
+   (`--ver-int`) and publication-based (`--ver-pub`) checks, wired into
+   `_build_ksi_seal_item`. Needs: an APT-installed, version-pinned
+   `ksi-tool` in the Dockerfile (license noted in README's dependencies
+   per the approved plan), a thin subprocess wrapper module in core with
+   an injectable "invoke" hook (matching how `RevocationFetchers`/
+   `Fetcher` are injectable elsewhere, so tests stay offline), and a
+   design decision on exactly what verdict_reason/tier a
+   publication-verified seal maps to (not `CONFIRMED_QUALIFIED` --
+   that's specifically an eIDAS-qualified claim we're not making for
+   KSI; needs its own wording, not yet decided).
+2. **Key-based tier**: held pending a real Scrive-produced sample
+   document, to confirm whether an unextended signature actually carries
+   a calendar authentication record in practice (strongly suggested by
+   Guardtime's docs, not yet empirically confirmed). Also the moment to
+   diff-check the real sample against Guardtime's reference embedding
+   structure confirmed above.
+3. **Point-in-time qualification wording**: "sealed before 2025-06-12" ->
+   honest note that the sealing service was eIDAS-qualified at the time.
+   Needs the `read_qualified_service_definitions()`-based boundary lookup
+   described above (not yet implemented) -- deriving the date from TL
+   data, never hardcoding it. Wording-only; no new verdict tier.
+   Reminder from the approved plan: the module-level docstring/comment
+   trail above should make clear *why* this needed new parsing rather
+   than reusing `TSPRegistry` as-is, so a future reader doesn't assume
+   the boundary lookup is trivial.
+4. **UI**: a distinct icon for `KSI_SEAL` (link/chain metaphor, not the
+   existing person/building/clock set) and a new "What is a KSI seal?"
+   glossary entry (one plain paragraph, publicly-witnessed-record
+   framing, vendor-neutral -- Guardtime/KSI as the technology, Scrive
+   only as an example producer).
+
 ## Next: Day 7 -- polish
 
 1. Review the new card design on the live Railway URL (auto-deployed on

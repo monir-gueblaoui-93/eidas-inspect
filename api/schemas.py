@@ -60,6 +60,9 @@ class SignatureItemOut(BaseModel):
     verdict_reason: str
     certificate: CertificateDetailsOut | None
     trust_match: TrustMatchOut | None
+    ksi_verification_tier: str | None
+    ksi_aggregation_time: datetime | None
+    ksi_identity_chain: tuple[str, ...] | None
 
 
 class VerdictBreakdownOut(BaseModel):

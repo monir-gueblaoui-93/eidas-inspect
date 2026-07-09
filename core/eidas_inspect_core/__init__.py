@@ -7,6 +7,7 @@ from .errors import (
 from .models import (
     CertificateDetails,
     IntegrityStatus,
+    KsiVerificationTier,
     RevocationSource,
     RevocationStatus,
     SignatureItem,
@@ -31,6 +32,7 @@ __all__ = [
     'PasswordRequiredError',
     'CertificateDetails',
     'IntegrityStatus',
+    'KsiVerificationTier',
     'RevocationFetchers',
     'RevocationSource',
     'RevocationStatus',
