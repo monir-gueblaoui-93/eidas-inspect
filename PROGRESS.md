@@ -867,12 +867,20 @@ required new structured facts from core, not just UI rearrangement --
   EU Trusted List -- full JSON shown to the user, `certificate` and
   `trust_match` populated exactly as designed, before commit.
 
-## New feature, in progress: KSI (Guardtime) seal support
+## Feature, complete for now: KSI (Guardtime) seal support
 
 Support for verifying KSI-sealed documents (Guardtime Keyless Signature
 Infrastructure -- the sealing method Scrive and others used historically,
-before switching to PAdES). Researched first, plan approved, now being
-implemented checkpoint by checkpoint per that approval.
+before switching to PAdES). Researched first, plan approved, then
+implemented checkpoint by checkpoint per that approval, through
+detection, real verification tiers, real-sample validation, and the UI.
+
+**Feature freeze called after this**: no new verification capabilities
+until the "Next for this feature" items below are picked back up
+deliberately -- the two open items are both either external-dependency
+work (the GlobalSign trust-chain gap) or need a real pre-boundary
+sample that doesn't exist yet, so there's nothing left to build blind.
+Next up is Day 7 polish.
 
 ### Research findings (full detail: session transcript; summarized here)
 
@@ -1171,6 +1179,58 @@ never committed, same rule as `Demo document.pdf`/`qes_document.pdf`/
   test extended to cover the new 3-tier fallback chain. 99/99 across
   `core/` + `api/` combined.
 
+### Done: KSI UI
+
+- **Distinct icon**: `IconLink` (a two-link chain glyph, `web/src/icons.jsx`)
+  for `KSI_SEAL` items -- visually unambiguous against the existing
+  person/building/clock set. Also drives the card header, wrapped in a
+  `<Term id="ksiSeal">` trigger so "KSI seal" itself opens the new
+  glossary entry, the same pattern `levelDisplay` already used for
+  "Qualified".
+- **Card layout adapted for KSI's own fields**: `SignatureCard` now
+  branches on `isKsiSeal(item)`. KSI items skip the `IssuerRow` and the
+  Level/Who/Trust chain/Revocation fields entirely (all X.509/EU-TL
+  concepts with no KSI equivalent -- `certificate`/`trust_match` are
+  always `None`, `level`/`trust_chain_status` always `unknown`,
+  `revocation_status` always `not_checked` for this item type, so
+  showing them would just be empty/meaningless rows). In their place:
+  a **Verification** field (`ksiTierDisplay` -- a short, plain-language
+  label per `KsiVerificationTier`, distinct from the full sentence
+  already in `plain_explanation`), a **Sealed** field (`ksiSealedDisplay`,
+  sourced from `ksi_aggregation_time` rather than the X.509-signature
+  `signing_time` field, which KSI items never populate), and an
+  **Identity chain** field (`ksiIdentityChainDisplay`, arrow-joined).
+  `CertificateSection` already returned `null` for a missing
+  `certificate` -- no change needed there.
+- **Integrity, adapted rather than reused as-is**: the generic
+  `integrityDisplay` branches on `modified_after_signing`, which is
+  always `null` for a KSI item (no incremental-update diff analysis is
+  done for this seal type) -- reusing it unmodified would show every
+  KSI seal, however strongly verified, as "could not fully confirm the
+  document was unchanged". `ksiIntegrityDisplay` reads `fully_covered`
+  (the real, computed `/ByteRange`-covers-to-EOF fact) instead, and
+  still leads with "Broken" when `intact`/`signature_valid` are false.
+- **New glossary entry** (`ksiSeal` in `glossary.js`): one plain
+  paragraph, publicly-witnessed-record framing, vendor-neutral --
+  Guardtime/KSI named as the technology, Scrive named only as an
+  example producer, and an explicit "not currently confirmed as an
+  eIDAS-qualified seal by this tool" line so the entry can't be
+  mistaken for a qualification claim.
+- **Verified in a real browser, against a real fixture**: re-fetched
+  Guardtime's own Apache-2.0 demo file
+  (`github.com/guardtime/ksi-pdf-verifier`'s `demo/signed.pdf` -- the
+  same one checkpoint 2 validated against, containing three real KSI
+  seals: two `internal_only` and one genuinely `broken`) and drove the
+  actual running app (`vite` dev server + local `uvicorn`) with
+  `puppeteer-core` against the already-installed local Chrome --
+  real file upload through the app's own hidden `<input type=file>`,
+  not a synthetic/mocked render. Confirmed all three cards render with
+  the link icon, no X.509/TL rows, correct per-tier Verification/
+  Integrity/Sealed/Identity-chain values (including both
+  `fully_covered: true` and `fully_covered: false` cases rendering
+  distinctly), and the glossary panel opening with the intended
+  vendor-neutral copy. `npm run lint` and `npm run build` both clean.
+
 ### Next for this feature
 
 1. **Point-in-time qualification wording**: "sealed before 2025-06-12" ->
@@ -1187,11 +1247,6 @@ never committed, same rule as `Demo document.pdf`/`qes_document.pdf`/
    publications file -- confirmed against a second, real-world signature
    this checkpoint to be the same external trust-chain gap for both
    tiers, not our own code, not specific to Guardtime's demo file.
-3. **UI**: a distinct icon for `KSI_SEAL` (link/chain metaphor, not the
-   existing person/building/clock set) and a new "What is a KSI seal?"
-   glossary entry (one plain paragraph, publicly-witnessed-record
-   framing, vendor-neutral -- Guardtime/KSI as the technology, Scrive
-   only as an example producer).
 
 ## Next: Day 7 -- polish
 

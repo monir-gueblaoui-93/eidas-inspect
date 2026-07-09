@@ -24,4 +24,8 @@ export const GLOSSARY = {
     label: 'Qualified timestamp',
     body: 'A qualified timestamp is issued by an accredited time-stamping authority and proves a document existed, unchanged, at a specific moment — carrying the same legal trust as a qualified signature.',
   },
+  ksiSeal: {
+    label: 'KSI seal',
+    body: "A KSI seal is produced by Keyless Signature Infrastructure (KSI), a sealing technology that works differently from the certificate-based signatures elsewhere on this page. Instead of relying on a certificate authority you have to trust, it anchors a document into a shared, publicly witnessed hash-chain record that anyone can independently check. Scrive is one example of a service that has produced documents sealed this way. A KSI seal is not currently confirmed as an eIDAS-qualified seal by this tool.",
+  },
 }

@@ -619,6 +619,7 @@ input {
   gap: var(--space-2);
   font-weight: 600;
   font-size: var(--text-sm);
+  overflow-wrap: anywhere;
 }
 
 .sig-field__value--trusted {

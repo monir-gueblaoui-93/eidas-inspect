@@ -14,6 +14,11 @@ import {
   whenDisplay,
   trustDisplay,
   revocationDisplay,
+  isKsiSeal,
+  ksiTierDisplay,
+  ksiSealedDisplay,
+  ksiIdentityChainDisplay,
+  ksiIntegrityDisplay,
 } from '../itemPresentation.js'
 
 function Field({ label, display }) {
@@ -71,6 +76,7 @@ export default function SignatureCard({ item }) {
   const type = typeDisplay(item)
   const TypeIcon = type.icon
   const [showTechnical, setShowTechnical] = useState(tone === 'not-trusted' || tone === 'partial')
+  const isKsi = isKsiSeal(item)
 
   const level = levelDisplay(item)
 
@@ -79,22 +85,33 @@ export default function SignatureCard({ item }) {
       <header className="sig-card__header">
         <span className="sig-card__type">
           <TypeIcon size={22} />
-          {type.label}
+          {type.termKey ? <Term id={type.termKey}>{type.label}</Term> : type.label}
         </span>
         <span className={`sig-card__badge sig-card__badge--${tone}`}>{itemBadge(item)}</span>
       </header>
 
       <p className="sig-card__lead">{item.plain_explanation}</p>
 
-      <IssuerRow item={item} />
+      {!isKsi && <IssuerRow item={item} />}
 
       <div className="sig-card__grid">
-        <Field label="Level" display={level} />
-        <Field label="Who" display={whoDisplay(item)} />
-        <Field label="Integrity" display={integrityDisplay(item)} />
-        <Field label="When" display={whenDisplay(item)} />
-        <Field label="Trust chain" display={trustDisplay(item)} />
-        <Field label="Revocation" display={revocationDisplay(item)} />
+        {isKsi ? (
+          <>
+            <Field label="Verification" display={ksiTierDisplay(item)} />
+            <Field label="Sealed" display={ksiSealedDisplay(item)} />
+            <Field label="Integrity" display={ksiIntegrityDisplay(item)} />
+            <Field label="Identity chain" display={ksiIdentityChainDisplay(item)} />
+          </>
+        ) : (
+          <>
+            <Field label="Level" display={level} />
+            <Field label="Who" display={whoDisplay(item)} />
+            <Field label="Integrity" display={integrityDisplay(item)} />
+            <Field label="When" display={whenDisplay(item)} />
+            <Field label="Trust chain" display={trustDisplay(item)} />
+            <Field label="Revocation" display={revocationDisplay(item)} />
+          </>
+        )}
       </div>
 
       <CertificateSection item={item} />

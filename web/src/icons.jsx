@@ -155,6 +155,15 @@ export function IconRotate(props) {
   )
 }
 
+export function IconLink(props) {
+  return (
+    <Svg {...props}>
+      <path d="M10 14a4.5 4.5 0 0 0 6.5.4l2.6-2.6a4.5 4.5 0 0 0-6.36-6.36L11.5 7.2" />
+      <path d="M14 10a4.5 4.5 0 0 0-6.5-.4l-2.6 2.6a4.5 4.5 0 0 0 6.36 6.36l1.24-1.24" />
+    </Svg>
+  )
+}
+
 export function IconExternalLink(props) {
   return (
     <Svg {...props}>
