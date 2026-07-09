@@ -1092,25 +1092,102 @@ implemented checkpoint by checkpoint per that approval.
   exercise the real installed binary when available (this machine, and
   now the container). 94/94 across `core/` + `api/` combined.
 
+### Done: checkpoint 3 -- validated against a real Scrive-produced sample
+
+A real Scrive KSI-sealed document (`ksi_sample.pdf`, gitignored --
+never committed, same rule as `Demo document.pdf`/`qes_document.pdf`/
+`test-real.pdf`) was run through the full validation gauntlet.
+
+- **Structural diff vs. Guardtime's reference embedding** (confirmed in
+  checkpoint 1's research): matches on everything that matters --
+  `/FT /KSI` on the widget, `/Filter /GT.KSI` + `/FT /DocTimeStamp` on
+  the inner signature dict (Guardtime's own reference reuses that same
+  key at that level, so it's not a Scrive quirk), the standard 4-element
+  `/ByteRange`, and hex `/Contents` encoding. `/ByteRange`'s tail
+  (`800955 + 3867`) lands exactly on the file's own length, so this
+  seal is `fully_covered`. Two genuine, harmless Scrive-specific
+  additions found: the inner signature dict also carries `/Type /Sig`
+  (Guardtime's reference doesn't set `/Type` there at all -- plausibly
+  for extra interop with generic PDF tools that key off `/Type /Sig`
+  rather than `/FT`; our own discovery code never reads `/Type`, so
+  this changes nothing here) and `/Name (Scrive)` instead of
+  Guardtime's instructional-URL string (just an identifying label, same
+  key). The widget also omits `/AP` (no visible appearance stream) and
+  the AcroForm dict omits `/SigFlags` -- neither read by our code,
+  flagged here only because the task asked for a full diff.
+- **Answered the open empirical question**: yes, this real signature
+  carries a Calendar Authentication Record as its trust anchor (`ksi
+  verify --ver-int --dump` shows `Trust anchor: Calendar Authentication
+  Record.` plus a full `Calendar Authentication Record PKI signature:`
+  block) -- confirming the tier this project's existing
+  `CALENDAR_VERIFIED` enum value was written for is real, not
+  speculative.
+- **Implemented the key-based tier**: `KsiToolRunner.verify_key_based`
+  (`ksi verify --ver-key -P <pubfile> --cnstr <constraint>`), wired into
+  `_run_ksi_verification` as a fallback after publication-based comes
+  back NA/TOOL_ERROR (publication-based stays tried first since it's
+  the strongest tier; key-based is what an unextended signature -- the
+  common case -- actually has a trust anchor for). `OK` ->
+  `CALENDAR_VERIFIED`, `FAIL` -> `BROKEN`, otherwise -> `INTERNAL_ONLY`.
+- **Validated the real sample through it -- and found the same external
+  gap checkpoint 2 already documented also blocks this tier**:
+  `--ver-key` against the live publications file lands on the identical
+  `[GEN-02] ... unable to get local issuer certificate` /
+  `CertificateExistence` NA that `--ver-pub` hits, for the same reason
+  (the Calendar Authentication Record's PKI signature chains through
+  GlobalSign's Document Signing Root R45, absent from this
+  environment's CA trust store). So this real document's tier resolves
+  to `INTERNAL_ONLY`, not `CALENDAR_VERIFIED` -- correct, honest
+  behavior given the environment, and further confirmation (now against
+  a genuinely-in-the-wild seal, not just Guardtime's own demo file) that
+  this is a real, externally-rooted trust-store gap rather than
+  something specific to Guardtime's demo file.
+- **Full pipeline run at the API level** (`POST /api/verify` via
+  `TestClient`, real `KsiToolRunner()`, not stubbed): 200 OK,
+  `ksi_verification_tier: "internal_only"`, `ksi_aggregation_time:
+  "2026-07-08T14:07:48Z"`, `ksi_identity_chain: ["GT:ANe2:2",
+  "GT:ASe2-0:0", "Scrive:ALe2-1-3:16", "public:anon:1"]` (note Scrive's
+  own client ID appearing in the aggregation chain -- direct evidence
+  this seal really was produced by Scrive's own KSI-signing
+  infrastructure, not a synthetic fixture), `verdict: "partial"`,
+  `plain_summary: "Partially trusted — qualified status could not be
+  confirmed right now for 1 of 1 seal."` -- the exact `INTERNAL_ONLY`
+  plain-language string from checkpoint 2, rendered against a real
+  production document for the first time.
+- **Point-in-time wording (checkpoint 3's other half) does not apply to
+  this document**: its aggregation time (2026-07-08) is *after*
+  Guardtime's 2025-06-12 EU-qualification withdrawal, not before it, so
+  the "sealed while still qualified" grandfather wording would be
+  wrong to show here regardless of whether it existed. The
+  `read_qualified_service_definitions()`-based boundary-lookup feature
+  itself therefore remains unimplemented -- still correctly scoped as
+  future work (see "Next for this feature" below), just not exercised
+  by this sample. A pre-2025-06-12 KSI-sealed document would be needed
+  to actually render it.
+- 5 new tests (`verify_key_based`'s flag usage + real captured NA output
+  in `test_ksi_tool.py`; `CALENDAR_VERIFIED` reachable + a key-based-FAIL
+  case in `test_ksi.py`; a real-binary integration test tolerating
+  `NA`/`OK`/`TOOL_ERROR` in `test_ksi_tool_integration.py`), one existing
+  test extended to cover the new 3-tier fallback chain. 99/99 across
+  `core/` + `api/` combined.
+
 ### Next for this feature
 
-1. **Key-based tier**: still held pending a real Scrive-produced sample
-   document, to confirm whether an unextended signature actually carries
-   a calendar authentication record in practice, and to diff-check the
-   real sample against Guardtime's reference embedding structure
-   confirmed in checkpoint 1.
-2. **Point-in-time qualification wording**: "sealed before 2025-06-12" ->
+1. **Point-in-time qualification wording**: "sealed before 2025-06-12" ->
    honest note that the sealing service was eIDAS-qualified at the time.
    Needs the `read_qualified_service_definitions()`-based boundary lookup
    described in checkpoint 1's research notes (not yet implemented) --
    deriving the date from TL data, never hardcoding it. Wording-only; no
-   new verdict tier.
-3. **`PUBLICATION_VERIFIED` reachability**: sourcing/trusting the correct
-   root (or resolving the `-V` rejection) so a genuinely extended,
-   publicly-witnessed KSI seal can actually reach its strongest tier
-   against the live publications file -- currently blocked on the
-   external trust-chain gap documented above, not on our own code.
-4. **UI**: a distinct icon for `KSI_SEAL` (link/chain metaphor, not the
+   new verdict tier. Still unvalidated against a real pre-boundary
+   sample -- `ksi_sample.pdf` postdates the boundary, so it can't
+   exercise this path.
+2. **`CALENDAR_VERIFIED`/`PUBLICATION_VERIFIED` reachability**:
+   sourcing/trusting the correct root (or resolving the `-V` rejection)
+   so a genuine KSI seal can actually reach either tier against the live
+   publications file -- confirmed against a second, real-world signature
+   this checkpoint to be the same external trust-chain gap for both
+   tiers, not our own code, not specific to Guardtime's demo file.
+3. **UI**: a distinct icon for `KSI_SEAL` (link/chain metaphor, not the
    existing person/building/clock set) and a new "What is a KSI seal?"
    glossary entry (one plain paragraph, publicly-witnessed-record
    framing, vendor-neutral -- Guardtime/KSI as the technology, Scrive

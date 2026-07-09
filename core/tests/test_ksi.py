@@ -56,16 +56,27 @@ KSI Verification result dump:
 """
 
 
-def _stub_ksi_runner(*, internal_dump: str, publication_dump: str | None = None) -> KsiToolRunner:
+def _stub_ksi_runner(
+    *,
+    internal_dump: str,
+    publication_dump: str | None = None,
+    key_dump: str | None = None,
+) -> KsiToolRunner:
     """A KsiToolRunner whose subprocess boundary is entirely faked --
-    returns internal_dump for --ver-int calls and publication_dump for
-    --ver-pub calls, keyed off the real CLI flags verify.py's own calls
-    use, so this stays a faithful stand-in regardless of exact temp file
-    paths (which verify_pdf generates itself and this test can't predict).
+    returns internal_dump for --ver-int calls, publication_dump for
+    --ver-pub calls, and key_dump for --ver-key calls, keyed off the real
+    CLI flags verify.py's own calls use, so this stays a faithful stand-in
+    regardless of exact temp file paths (which verify_pdf generates itself
+    and this test can't predict).
     """
 
     def invoke(args, timeout_seconds):
-        dump = publication_dump if '--ver-pub' in args else internal_dump
+        if '--ver-pub' in args:
+            dump = publication_dump
+        elif '--ver-key' in args:
+            dump = key_dump
+        else:
+            dump = internal_dump
         return subprocess.CompletedProcess(args=args, returncode=0, stdout=dump or '', stderr='')
 
     return KsiToolRunner(invoke=invoke)
@@ -151,9 +162,11 @@ def test_publication_verified_when_both_checks_pass():
     assert item.ksi_identity_chain == ('GT:anon:1',)
 
 
-def test_internal_only_when_internal_passes_but_publication_is_inconclusive():
+def test_internal_only_when_all_three_checks_are_inconclusive():
     pdf = build_ksi_sealed_pdf(build_minimal_pdf())
-    runner = _stub_ksi_runner(internal_dump=_REAL_OK_DUMP, publication_dump=_REAL_NA_DUMP)
+    runner = _stub_ksi_runner(
+        internal_dump=_REAL_OK_DUMP, publication_dump=_REAL_NA_DUMP, key_dump=_REAL_NA_DUMP
+    )
 
     result = verify_pdf(pdf, ksi_runner=runner)
 
@@ -161,6 +174,40 @@ def test_internal_only_when_internal_passes_but_publication_is_inconclusive():
     assert item.ksi_verification_tier == KsiVerificationTier.INTERNAL_ONLY
     assert item.verdict_reason == VerdictReason.UNCONFIRMED
     assert 'inconclusive' in item.technical_detail.lower()
+
+
+def test_calendar_verified_when_key_based_check_passes():
+    # Publication-based comes back NA (not yet extended -- the common case
+    # for a freshly-sealed document), but the weaker key-based tier holds:
+    # confirmed reachable against a real Scrive-produced KSI seal that
+    # carries a Calendar Authentication Record (see PROGRESS.md).
+    pdf = build_ksi_sealed_pdf(build_minimal_pdf())
+    runner = _stub_ksi_runner(
+        internal_dump=_REAL_OK_DUMP, publication_dump=_REAL_NA_DUMP, key_dump=_REAL_OK_DUMP
+    )
+
+    result = verify_pdf(pdf, ksi_runner=runner)
+
+    item = result.items[0]
+    assert item.ksi_verification_tier == KsiVerificationTier.CALENDAR_VERIFIED
+    assert item.verdict_reason == VerdictReason.NOT_QUALIFIED
+    assert 'signing certificate' in item.plain_explanation.lower()
+
+
+def test_broken_when_key_based_check_actively_fails():
+    # Distinct from NA/inconclusive: a key-based FAIL means a real
+    # mismatch was found, not just "couldn't confirm" -- must not be
+    # downgraded to a milder tier.
+    pdf = build_ksi_sealed_pdf(build_minimal_pdf())
+    runner = _stub_ksi_runner(
+        internal_dump=_REAL_OK_DUMP, publication_dump=_REAL_NA_DUMP, key_dump=_REAL_FAIL_DUMP
+    )
+
+    result = verify_pdf(pdf, ksi_runner=runner)
+
+    item = result.items[0]
+    assert item.ksi_verification_tier == KsiVerificationTier.BROKEN
+    assert item.verdict_reason == VerdictReason.BROKEN
 
 
 def test_broken_when_internal_check_fails():

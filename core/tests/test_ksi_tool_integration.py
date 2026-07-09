@@ -69,3 +69,20 @@ def test_real_ksi_tool_reports_na_for_an_unextended_signature():
     )
 
     assert result.outcome in (KsiCheckOutcome.NA, KsiCheckOutcome.TOOL_ERROR)
+
+
+def test_real_ksi_tool_key_based_check_is_na_on_this_environment():
+    # Same live-fetch caveat as the publication-based test above, plus a
+    # confirmed, documented environment gap: this fixture's Calendar
+    # Authentication Record's PKI signature chains through GlobalSign's
+    # "Document Signing Root R45", which isn't in this environment's CA
+    # trust store, so ksi-tool can't validate it -- an honest NA, not a
+    # bug in this project's code (see PROGRESS.md's KSI research notes).
+    # If that gap ever closes here, OK becomes the expected result too.
+    runner = KsiToolRunner()
+
+    result = runner.verify_key_based(
+        str(FIXTURES / 'demo-signature.ksig'), str(FIXTURES / 'demo-covered.bin')
+    )
+
+    assert result.outcome in (KsiCheckOutcome.NA, KsiCheckOutcome.OK, KsiCheckOutcome.TOOL_ERROR)

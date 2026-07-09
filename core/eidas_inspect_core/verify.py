@@ -325,22 +325,56 @@ def _run_ksi_verification(
 
         publication = ksi_runner.verify_publication_based(signature_path, data_path)
         if publication.outcome is KsiCheckOutcome.OK:
-            tier = KsiVerificationTier.PUBLICATION_VERIFIED
-            detail = None
-        elif publication.outcome is KsiCheckOutcome.FAIL:
+            return (
+                KsiVerificationTier.PUBLICATION_VERIFIED,
+                None,
+                internal.aggregation_time,
+                internal.identity_chain,
+            )
+        if publication.outcome is KsiCheckOutcome.FAIL:
             # Internal consistency held, but the publication-based check
             # found a real mismatch -- treat conservatively as broken
             # rather than silently downgrading to "couldn't confirm".
-            tier = KsiVerificationTier.BROKEN
-            detail = publication.detail
-        else:
-            # NA (not yet extended -- the common, expected case for a
-            # freshly-sealed document) or TOOL_ERROR (e.g. the
-            # publications file couldn't be fetched/verified just now).
-            tier = KsiVerificationTier.INTERNAL_ONLY
-            detail = publication.detail
+            return (
+                KsiVerificationTier.BROKEN,
+                publication.detail,
+                internal.aggregation_time,
+                internal.identity_chain,
+            )
 
-        return tier, detail, internal.aggregation_time, internal.identity_chain
+        # NA (not yet extended to a publication record -- the common,
+        # expected case for a freshly-sealed document) or TOOL_ERROR. Try
+        # the weaker key-based tier next: it checks the calendar
+        # authentication record's own PKI signature instead of a
+        # publication hash, and is what an unextended signature actually
+        # carries a trust anchor for.
+        key_based = ksi_runner.verify_key_based(signature_path, data_path)
+        if key_based.outcome is KsiCheckOutcome.OK:
+            return (
+                KsiVerificationTier.CALENDAR_VERIFIED,
+                None,
+                internal.aggregation_time,
+                internal.identity_chain,
+            )
+        if key_based.outcome is KsiCheckOutcome.FAIL:
+            return (
+                KsiVerificationTier.BROKEN,
+                key_based.detail,
+                internal.aggregation_time,
+                internal.identity_chain,
+            )
+
+        # Neither the publication-based nor key-based tier reached a
+        # confirmed verdict (both NA/TOOL_ERROR) -- e.g. the signature
+        # simply lacks both trust anchors yet, or (as observed against a
+        # real sample -- see PROGRESS.md) the key-based check's own PKI
+        # trust-store dependency is unavailable in this environment.
+        return (
+            KsiVerificationTier.INTERNAL_ONLY,
+            key_based.detail or publication.detail,
+            internal.aggregation_time,
+            internal.identity_chain,
+        )
 
 
 def _unreadable_ksi_seal_item(error: Exception) -> SignatureItem:

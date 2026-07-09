@@ -81,6 +81,34 @@ KSI Verification result dump:
     NA:\t[GEN-02] Verification inconclusive.\tIn rule:\tPublicationsFileContainsSuitablePublication
 """
 
+# Real output from: ksi verify --ver-key -i sample.ksig -f covered.bin
+#   -P http://verify.guardtime.com/ksi-publications.bin
+#   --cnstr "E=publications@guardtime.com" --dump
+# Captured against a real Scrive-produced KSI seal (not the Guardtime demo
+# file) -- this one *does* carry a Calendar Authentication Record, but the
+# check still lands on NA: ksi-tool can't validate the record's PKI
+# signature because the chain runs through GlobalSign's "Document Signing
+# Root R45", which isn't in this environment's CA trust store (same gap
+# already hit and documented for verify_publication_based -- see
+# PROGRESS.md's KSI research notes).
+_REAL_KEY_BASED_NA_CERT_TRUST_STDOUT = """
+KSI Signature dump:
+  Signing time: (1783519668) 2026-07-08 14:07:48 UTC+00:00
+  Trust anchor: Calendar Authentication Record.
+
+Calendar Authentication Record PKI signature:
+  Signing certificate ID: 5c:e0:25:a7
+  Signing certificate issued to: CN=H5 O=Guardtime
+
+KSI Verification result dump:
+  Verification abstract:
+    Verifying calendar authentication record... na
+  Verification details:
+    NA:\t[GEN-02] Verification inconclusive.\tIn rule:\tCertificateExistence (Ksierr: 0x109 The PKI certificate is not trusted. Exterr: 'Unable to verify certificate: (error = 20) unable to get local issuer certificate')
+  Final result:
+    NA:\t[GEN-02] Verification inconclusive.\tIn rule:\tCertificateExistence (Ksierr: 0x109 The PKI certificate is not trusted. Exterr: 'Unable to verify certificate: (error = 20) unable to get local issuer certificate')
+"""
+
 
 def _stub_runner(stdout: str, returncode: int = 0) -> KsiToolRunner:
     def invoke(args, timeout_seconds):
@@ -126,6 +154,37 @@ def test_real_na_output_for_an_unextended_signature_is_parsed_correctly():
     assert result.outcome is KsiCheckOutcome.NA
     assert result.detail is not None
     assert 'inconclusive' in result.detail.lower()
+
+
+def test_key_based_verification_uses_the_ver_key_flag():
+    calls = []
+
+    def invoke(args, timeout_seconds):
+        calls.append(args)
+        return subprocess.CompletedProcess(
+            args=args, returncode=0, stdout=_REAL_OK_STDOUT, stderr=''
+        )
+
+    runner = KsiToolRunner(invoke=invoke)
+    result = runner.verify_key_based('sig.ksig', 'data.bin')
+
+    assert result.outcome is KsiCheckOutcome.OK
+    assert '--ver-key' in calls[0]
+    assert '-P' in calls[0]
+    assert '--cnstr' in calls[0]
+
+
+def test_real_key_based_na_output_on_an_untrusted_pki_chain_is_parsed_correctly():
+    # Confirms the empirically-observed environment gap (missing GlobalSign
+    # "Document Signing Root R45" trust anchor) surfaces as an honest NA,
+    # not a false OK or an unlabeled crash.
+    runner = _stub_runner(_REAL_KEY_BASED_NA_CERT_TRUST_STDOUT, returncode=6)
+
+    result = runner.verify_key_based('sig.ksig', 'data.bin')
+
+    assert result.outcome is KsiCheckOutcome.NA
+    assert result.detail is not None
+    assert 'not trusted' in result.detail.lower()
 
 
 def test_bad_invocation_with_no_final_result_line_is_a_tool_error():

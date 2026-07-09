@@ -116,6 +116,47 @@ class KsiToolRunner:
         )
         return _parse_dump(result)
 
+    def verify_key_based(
+        self,
+        signature_path: str,
+        data_path: str,
+        publications_file_url: str = GUARDTIME_PUBLICATIONS_FILE_URL,
+        cert_constraint: str = GUARDTIME_PUBLICATIONS_CERT_CONSTRAINT,
+    ) -> KsiCheckResult:
+        """Key-based verification -- validates the PKI signature over the
+        signature's own Calendar Authentication Record against a
+        certificate constrained the same way the publications file's
+        signing cert is (``-P``/``--cnstr`` are only used here to identify
+        the trust anchor, not to check a publication hash). This is the
+        tier a just-sealed signature actually supports before it's been
+        extended to carry a publication record -- confirmed empirically
+        against a real Scrive-produced KSI seal (see PROGRESS.md).
+
+        Empirically, on every environment tested so far, this also hits
+        the same GlobalSign "Document Signing Root R45" trust-store gap
+        documented for :meth:`verify_publication_based` (``ksi-tool``
+        rejects supplying that root directly via ``-V``): the check
+        reaches ``NA`` on ``CertificateExistence``, not a real pass/fail
+        verdict. Kept as a distinct method (rather than folded into
+        publication-based) because it's a genuinely different trust
+        anchor, and the day this environment gap closes, this is the call
+        that should start returning ``OK``.
+        """
+        result = self._run(
+            'verify',
+            '--ver-key',
+            '-i',
+            signature_path,
+            '-f',
+            data_path,
+            '-P',
+            publications_file_url,
+            '--cnstr',
+            cert_constraint,
+            '--dump',
+        )
+        return _parse_dump(result)
+
     def verify_publication_based(
         self,
         signature_path: str,
