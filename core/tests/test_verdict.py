@@ -383,13 +383,15 @@ def test_qes_and_calendar_verified_ksi_seal_is_trusted():
     assert result.verdict_breakdown.confirmed_independent == 1
 
 
-def test_qes_and_internal_only_ksi_seal_stays_partial():
-    # Locks in the decision-table call on INTERNAL_ONLY: self-consistency
-    # alone, with neither independent check (key-based or
-    # publication-based) reaching a conclusive answer, is *not* enough to
-    # count as trusted -- same honest-gap treatment as an unavailable
-    # Trusted List. Must not silently become TRUSTED just because nothing
-    # is technically "broken".
+def test_qes_and_internal_only_ksi_seal_is_trusted():
+    # Correctness fix, not the original decision-table call: an intact
+    # INTERNAL_ONLY KSI seal counts as CONFIRMED_INTACT, not UNCONFIRMED --
+    # KSI answers an integrity question (has the document been altered
+    # since sealing?), not a qualified-identity one, so "neither external
+    # check was reachable yet" is not the same honest gap as an unconfirmed
+    # qualified claim. A QES plus an intact KSI seal must be TRUSTED, with
+    # wording that names each on its own terms -- never implying the KSI
+    # seal is a failed/partial qualified signature.
     ca_key, ca_subject, ca_cert_cx = generate_ca()
     signer, _ = generate_ca_issued_signer(
         ca_key, ca_subject, ca_cert_cx,
@@ -418,14 +420,80 @@ def test_qes_and_internal_only_ksi_seal_stays_partial():
 
     ksi_item = next(i for i in result.items if i.type == SignatureType.KSI_SEAL)
     assert ksi_item.ksi_verification_tier == KsiVerificationTier.INTERNAL_ONLY
+    assert ksi_item.verdict_reason == VerdictReason.CONFIRMED_INTACT
+    assert result.verdict == VerificationVerdict.TRUSTED
+    assert result.plain_summary == (
+        "Fully trusted — 1 of 2 items is qualified and intact; 1 is an intact "
+        "KSI seal with no independent external confirmation reachable."
+    )
+    assert 'qualified' not in result.plain_summary.split(';')[1]
+    assert 'independently verified' not in result.plain_summary
+    assert result.verdict_breakdown.confirmed_intact == 1
+    assert result.verdict_breakdown.unconfirmed == 0
+
+
+def test_ksi_only_internal_only_is_trusted_without_qualified_or_independent_wording():
+    # A KSI-only document whose seal is intact but reached no external
+    # corroboration must still be TRUSTED on its own -- the banner must
+    # read as trusted/positive, not "Partially trusted", and must never
+    # borrow "qualified" or "independently verified" language, since
+    # neither claim applies to an internal-only result.
+    pdf = build_ksi_sealed_pdf(build_minimal_pdf())
+
+    runner = _ksi_runner_stub(publication_dump=_KSI_NA_DUMP, key_dump=_KSI_NA_DUMP)
+    result = verify_pdf(pdf, ksi_runner=runner)
+
+    ksi_item = result.items[0]
+    assert ksi_item.ksi_verification_tier == KsiVerificationTier.INTERNAL_ONLY
+    assert ksi_item.verdict_reason == VerdictReason.CONFIRMED_INTACT
+    assert result.verdict == VerificationVerdict.TRUSTED
+    assert result.plain_summary == (
+        "Trusted — this document's KSI seal is intact, and hasn't been "
+        "altered since it was sealed. Independent confirmation against a "
+        "public record wasn't reachable right now."
+    )
+    assert 'qualified' not in result.plain_summary.lower()
+    assert 'independently verified' not in result.plain_summary
+    assert not result.plain_summary.startswith('Fully')
+    assert result.verdict_breakdown.confirmed_intact == 1
+    assert result.verdict_breakdown.unconfirmed == 0
+
+
+def test_broken_ksi_seal_alone_is_not_trusted():
+    # A genuinely broken/inconsistent KSI seal -- the one case that must
+    # still demote it off the trusted axis, per the corrected rule: only a
+    # real integrity failure downgrades a KSI seal, never "couldn't reach a
+    # stronger external confirmation".
+    pdf = build_ksi_sealed_pdf(build_minimal_pdf(), malformed=True)
+
+    result = verify_pdf(pdf)
+
+    ksi_item = result.items[0]
+    assert ksi_item.ksi_verification_tier == KsiVerificationTier.BROKEN
+    assert ksi_item.verdict_reason == VerdictReason.BROKEN
+    assert result.verdict == VerificationVerdict.NOT_TRUSTED
+    assert result.plain_summary == "Do not rely on this document."
+
+
+def test_ksi_only_not_verified_is_partial_without_qualified_wording():
+    # A KSI seal that hasn't even had its internal check attempted yet
+    # (no ksi_runner wired up) stays an honest UNCONFIRMED gap -- but the
+    # wording must never say "qualified status", a claim reserved for
+    # X.509 signatures/seals that actually make it. KSI makes no qualified
+    # claim at all, in any tier.
+    pdf = build_ksi_sealed_pdf(build_minimal_pdf())
+
+    result = verify_pdf(pdf)
+
+    ksi_item = result.items[0]
+    assert ksi_item.ksi_verification_tier == KsiVerificationTier.NOT_VERIFIED
     assert ksi_item.verdict_reason == VerdictReason.UNCONFIRMED
     assert result.verdict == VerificationVerdict.PARTIAL
+    assert 'qualified' not in result.plain_summary.lower()
     assert result.plain_summary == (
-        "Partially trusted — qualified status could not be confirmed right "
-        "now for 1 of 2 items."
+        "Partially trusted — verification could not be completed right now "
+        "for 1 of 1 seal."
     )
-    assert result.verdict_breakdown.confirmed_independent == 0
-    assert result.verdict_breakdown.unconfirmed == 1
 
 
 def test_three_items_two_valid_one_broken_is_partial_with_correct_count():

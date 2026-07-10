@@ -71,6 +71,7 @@ class VerdictBreakdownOut(BaseModel):
     total: int
     confirmed_qualified: int
     confirmed_independent: int
+    confirmed_intact: int
     issues: int
     unconfirmed: int
     not_qualified: int

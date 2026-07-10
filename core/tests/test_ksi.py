@@ -172,7 +172,11 @@ def test_internal_only_when_all_three_checks_are_inconclusive():
 
     item = result.items[0]
     assert item.ksi_verification_tier == KsiVerificationTier.INTERNAL_ONLY
-    assert item.verdict_reason == VerdictReason.UNCONFIRMED
+    # Intact and internally consistent -- counts as CONFIRMED_INTACT (a
+    # real, positive integrity result), not UNCONFIRMED: neither external
+    # check being reachable yet is not the same as an honest gap in a
+    # qualified-identity claim KSI never makes in the first place.
+    assert item.verdict_reason == VerdictReason.CONFIRMED_INTACT
     assert 'inconclusive' in item.technical_detail.lower()
 
 

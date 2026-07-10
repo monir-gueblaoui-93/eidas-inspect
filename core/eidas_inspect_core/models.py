@@ -130,6 +130,21 @@ class VerdictReason(StrEnum):
     the same way :attr:`CONFIRMED_QUALIFIED` does, but must never be
     described as "qualified" in any plain-language wording."""
 
+    CONFIRMED_INTACT = 'confirmed_intact'
+    """Intact and internally self-consistent (currently: a KSI seal that
+    reached ``INTERNAL_ONLY`` -- its own hash-chain checks out, but neither
+    the key-based nor the publication-based external check reached a
+    conclusive answer). KSI answers an *integrity* question ("has this
+    document been altered since sealing?"), not a qualified-identity
+    question -- judging it against "is it qualified?" is a category error,
+    and "couldn't reach a stronger external confirmation" is not a failure
+    of that integrity question. Counts toward :attr:`VerificationVerdict.TRUSTED`
+    the same way :attr:`CONFIRMED_QUALIFIED`/:attr:`CONFIRMED_INDEPENDENT` do
+    -- but must never be described as "qualified" *or* "independently
+    verified" (that phrasing is reserved for a check that actually reached
+    an external corroboration; this one didn't). Only a genuinely broken/
+    inconsistent seal (:attr:`BROKEN`) demotes a KSI item off this axis."""
+
     BROKEN = 'broken'
     """Cryptographic integrity failed (bad digest or signature)."""
 
@@ -165,6 +180,7 @@ class VerdictBreakdown:
     total: int
     confirmed_qualified: int
     confirmed_independent: int
+    confirmed_intact: int
     issues: int
     unconfirmed: int
     not_qualified: int

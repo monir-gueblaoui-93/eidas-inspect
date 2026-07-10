@@ -53,6 +53,7 @@ export function itemTone(item) {
   switch (item.verdict_reason) {
     case 'confirmed_qualified':
     case 'confirmed_independent':
+    case 'confirmed_intact':
       return TONE.TRUSTED
     case 'broken':
     case 'tampered':
@@ -76,6 +77,13 @@ export function itemBadge(item) {
       // qualification claim. Same green-family weight as "Qualified &
       // confirmed" (see itemTone above), distinct label.
       return 'Independently verified'
+    case 'confirmed_intact':
+      // Distinct from both "Qualified & confirmed" and "Independently
+      // verified": this KSI seal is intact and internally consistent, but
+      // no external check (calendar cert / publication record) was
+      // reachable -- true on its own terms, but "independently verified"
+      // would overclaim an external corroboration that didn't happen.
+      return 'Intact'
     case 'broken':
       return 'Broken'
     case 'tampered':
@@ -305,9 +313,15 @@ const KSI_TIER_META = {
     text: 'Not independently verified',
   },
   internal_only: {
-    icon: IconAlertTriangle,
-    tone: TONE.PARTIAL,
-    text: 'Internally consistent only',
+    // tone TRUSTED, not PARTIAL: core's verdict_reason for this tier is
+    // CONFIRMED_INTACT -- the seal's own hash-chain check genuinely
+    // passed, and that's the only integrity question KSI answers. "No
+    // external check reachable yet" is not a failure of that question, so
+    // this must never read as an amber/warning state. Text still honestly
+    // distinguishes it from the stronger externally-anchored tiers below.
+    icon: IconCheckCircle,
+    tone: TONE.TRUSTED,
+    text: 'Intact — no external confirmation reachable yet',
   },
   calendar_verified: {
     // tone TRUSTED, not NEUTRAL: core's verdict_reason for this tier is
@@ -354,7 +368,16 @@ export function ksiTierDisplay(item) {
  * tier-specific wording; this is the blunter, glanceable version. */
 const KSI_LEVEL_BADGE_META = {
   not_verified: { icon: IconInfoCircle, tone: TONE.NEUTRAL, text: 'Not yet verified' },
-  internal_only: { icon: IconAlertTriangle, tone: TONE.PARTIAL, text: 'Internally consistent only' },
+  internal_only: {
+    // Deliberately not "Independently verified" -- that phrase is reserved
+    // for calendar_verified/publication_verified, which really did reach
+    // an external check. This tier is a genuine trusted result too (its
+    // own hash-chain check passed), just a different, honest claim: intact.
+    icon: IconCheckCircle,
+    tone: TONE.TRUSTED,
+    text: 'Intact',
+    strong: true,
+  },
   calendar_verified: {
     icon: IconShieldCheck,
     tone: TONE.TRUSTED,

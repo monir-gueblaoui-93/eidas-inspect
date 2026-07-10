@@ -154,7 +154,7 @@ def _collect_ksi_seals(reader: PdfFileReader) -> list[tuple[str, object]]:
 
 _KSI_TIER_VERDICT_REASON = {
     KsiVerificationTier.NOT_VERIFIED: VerdictReason.UNCONFIRMED,
-    KsiVerificationTier.INTERNAL_ONLY: VerdictReason.UNCONFIRMED,
+    KsiVerificationTier.INTERNAL_ONLY: VerdictReason.CONFIRMED_INTACT,
     KsiVerificationTier.CALENDAR_VERIFIED: VerdictReason.CONFIRMED_INDEPENDENT,
     KsiVerificationTier.PUBLICATION_VERIFIED: VerdictReason.CONFIRMED_INDEPENDENT,
     KsiVerificationTier.BROKEN: VerdictReason.BROKEN,
@@ -171,14 +171,21 @@ toward an overall ``TRUSTED`` verdict (see ``_overall_verdict``) -- a
 well-verified KSI seal is a genuine positive result on its own terms,
 just not a "qualified" one.
 
-``INTERNAL_ONLY`` deliberately stays ``UNCONFIRMED``, not
-``CONFIRMED_INDEPENDENT``: it means neither the key-based nor the
-publication-based check reached a conclusive answer, so nothing outside
-the token's own self-consistency has corroborated it -- the same honest
-gap as a certificate whose Trusted List status is unavailable. Treating
-bare self-consistency as "trusted" would let any internally-coherent
-token (including a forged one with no real anchoring) carry a verdict to
-green."""
+``INTERNAL_ONLY`` maps to ``CONFIRMED_INTACT``, not ``UNCONFIRMED`` --
+corrected from an earlier version of this table that treated it as an
+honest gap the same way an unavailable Trusted List is. That was a
+category error: KSI answers an *integrity* question (has the document
+been altered since sealing?), never a qualified-identity question, so
+"neither external check could be reached yet" is not the same kind of
+gap as "this signature claims to be qualified but we couldn't confirm
+it" -- there is no qualified claim here to leave unconfirmed. The seal's
+own internal hash-chain check genuinely passed; that *is* the integrity
+answer, and it counts as an intact, trusted result on its own terms (see
+``_overall_verdict``). Only ``BROKEN`` -- the seal's own consistency
+check actually failing -- demotes a KSI item off this axis.
+``CONFIRMED_INTACT`` must never be worded as "independently verified"
+(reserved for ``CONFIRMED_INDEPENDENT``, which really did pass an
+external check) or "qualified" (KSI makes no such claim at all)."""
 
 _KSI_TIER_PLAIN_TEXT = {
     KsiVerificationTier.NOT_VERIFIED: (
@@ -187,11 +194,11 @@ _KSI_TIER_PLAIN_TEXT = {
         'so its validity could not be confirmed.'
     ),
     KsiVerificationTier.INTERNAL_ONLY: (
-        'This document carries a Guardtime KSI seal. Its internal '
-        "consistency checks out, but this tool couldn't independently "
-        'confirm it any further right now -- that requires either the '
-        "sealing provider's live service, or waiting for this seal to be "
-        'extended to a publicly published record.'
+        "This document's KSI seal is intact -- the document hasn't been "
+        'altered since it was sealed. Independent confirmation against a '
+        "public record wasn't reachable right now -- that requires either "
+        "the sealing provider's live service, or waiting for this seal to "
+        'be extended to a publicly published record.'
     ),
     KsiVerificationTier.CALENDAR_VERIFIED: (
         'This document carries a Guardtime KSI seal, checked against the '
@@ -1206,18 +1213,23 @@ def _overall_verdict(
     total = len(counted_items)
     confirmed_qualified = reasons.count(VerdictReason.CONFIRMED_QUALIFIED)
     confirmed_independent = reasons.count(VerdictReason.CONFIRMED_INDEPENDENT)
-    trusted_count = confirmed_qualified + confirmed_independent
+    confirmed_intact = reasons.count(VerdictReason.CONFIRMED_INTACT)
+    trusted_count = confirmed_qualified + confirmed_independent + confirmed_intact
     issues = sum(1 for r in reasons if r in _ISSUE_REASONS)
     unconfirmed = reasons.count(VerdictReason.UNCONFIRMED)
     not_qualified = reasons.count(VerdictReason.NOT_QUALIFIED)
 
     # TRUSTED requires every item to be independently trustworthy on its
-    # own terms -- CONFIRMED_QUALIFIED (eIDAS-qualified and confirmed) or
+    # own terms -- CONFIRMED_QUALIFIED (eIDAS-qualified and confirmed),
     # CONFIRMED_INDEPENDENT (a real positive result via a different trust
-    # mechanism, e.g. a well-verified KSI seal) -- never merely "more than
-    # one item". A single NOT_QUALIFIED item (an ordinary advanced
-    # signature/seal that doesn't claim eIDAS qualification at all) still
-    # caps the document at PARTIAL, same as always.
+    # mechanism reaching an external check, e.g. a KSI seal verified
+    # against a publication record or the sealer's own certificate), or
+    # CONFIRMED_INTACT (a KSI seal that's genuinely intact and internally
+    # consistent, even if no external check was reachable -- integrity is
+    # the only question KSI answers, and it was satisfied) -- never merely
+    # "more than one item". A single NOT_QUALIFIED item (an ordinary
+    # advanced signature/seal that doesn't claim eIDAS qualification at
+    # all) still caps the document at PARTIAL, same as always.
     if trusted_count == total:
         verdict = VerificationVerdict.TRUSTED
     elif issues == total:
@@ -1229,6 +1241,7 @@ def _overall_verdict(
         total=total,
         confirmed_qualified=confirmed_qualified,
         confirmed_independent=confirmed_independent,
+        confirmed_intact=confirmed_intact,
         issues=issues,
         unconfirmed=unconfirmed,
         not_qualified=not_qualified,
@@ -1286,29 +1299,71 @@ def _plain_summary(
     total = breakdown.total
 
     if verdict is VerificationVerdict.TRUSTED:
-        if breakdown.confirmed_independent == 0:
+        confirmed_qualified = breakdown.confirmed_qualified
+        confirmed_independent = breakdown.confirmed_independent
+        confirmed_intact = breakdown.confirmed_intact
+
+        if confirmed_independent == 0 and confirmed_intact == 0:
             # Every trusted item here is eIDAS-qualified -- the original,
             # unchanged wording.
             if total == 1:
                 return f"Fully trusted — the {noun} is qualified and intact."
             return f"Fully trusted — all {total} {noun} are qualified and intact."
-        descriptor = _ksi_independent_descriptor(items)
-        if breakdown.confirmed_qualified == 0:
-            # Nothing here claims eIDAS qualification at all (e.g. a
-            # KSI-only document) -- deliberately no "Fully" and no
-            # "qualified": this is a real, positive result, just a
-            # different claim than eIDAS qualification.
+
+        if confirmed_qualified == 0 and confirmed_independent == 0:
+            # Every trusted item here is a KSI seal that's intact and
+            # internally consistent, but reached no external corroboration
+            # (INTERNAL_ONLY) -- a real, positive integrity result on its
+            # own terms. Deliberately doesn't say "independently verified"
+            # (that phrase is reserved for a check that actually reached an
+            # external anchor) or "qualified" (not this trust mechanism's
+            # claim at all).
+            if total == 1:
+                return (
+                    "Trusted — this document's KSI seal is intact, and "
+                    "hasn't been altered since it was sealed. Independent "
+                    "confirmation against a public record wasn't reachable "
+                    "right now."
+                )
+            return (
+                f"Trusted — all {total} {noun} are intact, and haven't been "
+                "altered since sealing. Independent confirmation against a "
+                "public record wasn't reachable right now."
+            )
+
+        if confirmed_qualified == 0 and confirmed_intact == 0:
+            # Every trusted item here is a KSI seal that reached a genuine
+            # external check (CALENDAR_VERIFIED/PUBLICATION_VERIFIED) --
+            # deliberately no "Fully" and no "qualified": this is a real,
+            # positive result, just a different claim than eIDAS
+            # qualification.
+            descriptor = _ksi_independent_descriptor(items)
             return f"Trusted — integrity independently verified{descriptor}."
-        # A genuine mix: some items are eIDAS-qualified, some are
-        # independently confirmed through a different mechanism. Named
-        # separately rather than lumped under one blanket "qualified".
-        return (
-            f"Fully trusted — {breakdown.confirmed_qualified} of {total} {noun} "
-            f"{'is' if breakdown.confirmed_qualified == 1 else 'are'} qualified and "
-            f"intact; {breakdown.confirmed_independent} "
-            f"{'is' if breakdown.confirmed_independent == 1 else 'are'} independently "
-            f"verified{descriptor}."
-        )
+
+        # A genuine mix of two or more buckets -- describe each on its own
+        # terms, never lumped under one blanket claim, and never implying a
+        # KSI item is a failed/partial qualified signature.
+        clauses = []
+        if confirmed_qualified:
+            clauses.append(
+                f"{confirmed_qualified} of {total} {noun} "
+                f"{'is' if confirmed_qualified == 1 else 'are'} qualified and intact"
+            )
+        if confirmed_independent:
+            descriptor = _ksi_independent_descriptor(items)
+            clauses.append(
+                f"{confirmed_independent} "
+                f"{'is' if confirmed_independent == 1 else 'are'} independently "
+                f"verified{descriptor}"
+            )
+        if confirmed_intact:
+            clauses.append(
+                f"{confirmed_intact} "
+                f"{'is' if confirmed_intact == 1 else 'are'} an intact KSI seal "
+                "with no independent external confirmation reachable"
+            )
+        heading = "Fully trusted" if confirmed_qualified else "Trusted"
+        return f"{heading} — " + "; ".join(clauses) + "."
 
     if verdict is VerificationVerdict.NOT_TRUSTED:
         return "Do not rely on this document."
@@ -1319,19 +1374,43 @@ def _plain_summary(
             f"{'has' if breakdown.issues == 1 else 'have'} issues."
         )
     if breakdown.unconfirmed:
+        ksi_unconfirmed = sum(
+            1
+            for i in items
+            if i.verdict_reason is VerdictReason.UNCONFIRMED
+            and i.type is SignatureType.KSI_SEAL
+        )
+        x509_unconfirmed = breakdown.unconfirmed - ksi_unconfirmed
+        if ksi_unconfirmed and not x509_unconfirmed:
+            # KSI never claims "qualified" status -- an unconfirmed KSI
+            # item (its own internal check hasn't even been reached yet)
+            # must never borrow the X.509-specific "qualified status"
+            # phrasing below.
+            return (
+                "Partially trusted — verification could not be completed "
+                f"right now for {breakdown.unconfirmed} of {total} {noun}."
+            )
+        if x509_unconfirmed and not ksi_unconfirmed:
+            return (
+                "Partially trusted — qualified status could not be confirmed "
+                f"right now for {breakdown.unconfirmed} of {total} {noun}."
+            )
+        # A genuine mix of both unconfirmed flavors -- avoid "qualified" as
+        # a blanket claim over items that never made that claim at all.
         return (
-            "Partially trusted — qualified status could not be confirmed "
-            f"right now for {breakdown.unconfirmed} of {total} {noun}."
+            "Partially trusted — status could not be confirmed right now "
+            f"for {breakdown.unconfirmed} of {total} {noun}."
         )
     # No issues, nothing unconfirmed -- everything remaining is either
-    # CONFIRMED_INDEPENDENT or simply valid but not qualified (e.g. an
-    # ordinary advanced signature). A known fact, not a problem or an
-    # uncertainty. (Reached only when NOT_QUALIFIED > 0: if every item were
-    # CONFIRMED_QUALIFIED/CONFIRMED_INDEPENDENT, trusted_count == total and
-    # the verdict would already be TRUSTED, not PARTIAL.)
+    # CONFIRMED_INDEPENDENT, CONFIRMED_INTACT, or simply valid but not
+    # qualified (e.g. an ordinary advanced signature). A known fact, not a
+    # problem or an uncertainty. (Reached only when NOT_QUALIFIED > 0: if
+    # every item were CONFIRMED_QUALIFIED/CONFIRMED_INDEPENDENT/
+    # CONFIRMED_INTACT, trusted_count == total and the verdict would
+    # already be TRUSTED, not PARTIAL.)
     if total == 1:
         return f"Partially trusted — the {noun} is valid but not qualified."
-    if breakdown.confirmed_independent == 0:
+    if breakdown.confirmed_independent == 0 and breakdown.confirmed_intact == 0:
         # Original two-way wording, unchanged.
         qualified_count = breakdown.confirmed_qualified
         return (
@@ -1339,7 +1418,9 @@ def _plain_summary(
             f"{'is' if qualified_count == 1 else 'are'} qualified; the rest are "
             "valid but not qualified."
         )
-    trusted_count = breakdown.confirmed_qualified + breakdown.confirmed_independent
+    trusted_count = (
+        breakdown.confirmed_qualified + breakdown.confirmed_independent + breakdown.confirmed_intact
+    )
     return (
         f"Partially trusted — {trusted_count} of {total} {noun} "
         f"{'is' if trusted_count == 1 else 'are'} confirmed; the rest "

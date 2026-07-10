@@ -1343,29 +1343,38 @@ confirmed two *distinct* root causes, not one:
 | X.509 sig/seal | broken / tampered / revoked / untrusted | issue reasons | no | unchanged | no |
 | KSI seal | `BROKEN` tier | `BROKEN` | no | unchanged | no |
 | KSI seal | `NOT_VERIFIED` tier | `UNCONFIRMED` | no | unchanged | no |
-| KSI seal | `INTERNAL_ONLY` tier | `UNCONFIRMED` | no | **unchanged, by design** | no |
+| KSI seal | `INTERNAL_ONLY` tier | `UNCONFIRMED` | no | **corrected: `CONFIRMED_INTACT`** (see below) | **yes** |
 | KSI seal | `CALENDAR_VERIFIED` tier | `NOT_QUALIFIED` | no (bug) | new: `CONFIRMED_INDEPENDENT` | yes |
 | KSI seal | `PUBLICATION_VERIFIED` tier | `NOT_QUALIFIED` | no (bug) | new: `CONFIRMED_INDEPENDENT` | yes |
 
 New rule: **`TRUSTED` iff every counted item's reason is
-`CONFIRMED_QUALIFIED` or `CONFIRMED_INDEPENDENT`.** Everything else about
-`_overall_verdict` (`NOT_TRUSTED` when every item is an issue, `PARTIAL`
-otherwise) is unchanged.
+`CONFIRMED_QUALIFIED`, `CONFIRMED_INDEPENDENT`, or `CONFIRMED_INTACT`.**
+Everything else about `_overall_verdict` (`NOT_TRUSTED` when every item is
+an issue, `PARTIAL` otherwise) is unchanged.
 
-**The `INTERNAL_ONLY` call, made explicitly rather than by default**:
-stays `UNCONFIRMED`, not trusted. It means *neither* independent check
-(key-based or publication-based) reached a conclusive answer -- the token
-is self-consistent, but nothing outside it corroborates that, the same
-honest gap as a certificate whose Trusted List status is unavailable.
-Treating bare self-consistency as "trusted" would let any
-internally-coherent token -- including a forged one with no real
-anchoring -- carry a verdict to green. Real cost of this call, stated
-plainly: `ksi_sample.pdf`, the one real-world KSI document tested so far,
-currently lands on `INTERNAL_ONLY` in every environment tested (the
-GlobalSign trust-chain gap blocks both stronger tiers universally right
-now) -- so no real KSI seal tested to date can currently reach `TRUSTED`.
-That's judged to be the honest outcome given the actual state of the
-world, not a reason to lower the bar.
+**The `INTERNAL_ONLY` row above is corrected, not original** -- see
+"Fixed: KSI `INTERNAL_ONLY` was mis-verdicted as an unconfirmed qualified
+claim" further down for the full writeup and why this table's original
+`INTERNAL_ONLY` call (quoted below for the historical record) was itself
+a bug, not a considered trade-off:
+
+> **The `INTERNAL_ONLY` call, made explicitly rather than by default**:
+> stays `UNCONFIRMED`, not trusted. It means *neither* independent check
+> (key-based or publication-based) reached a conclusive answer -- the
+> token is self-consistent, but nothing outside it corroborates that, the
+> same honest gap as a certificate whose Trusted List status is
+> unavailable. Treating bare self-consistency as "trusted" would let any
+> internally-coherent token -- including a forged one with no real
+> anchoring -- carry a verdict to green.
+
+That reasoning conflated two different questions: whether a *qualified
+claim* was confirmed (the honest-gap axis `UNCONFIRMED` exists for), and
+whether *integrity* was confirmed (the only axis KSI ever claims to
+answer). `INTERNAL_ONLY` means the seal's own hash-chain check -- the
+actual integrity question -- already came back conclusively OK; nothing
+about it is a forged or unconfirmed token. What's unreached is a
+*stronger, external* corroboration of that same already-confirmed
+integrity fact, not a pending answer to a claim the seal never made.
 
 **Two forks surfaced and resolved before coding** (both: yes, per
 explicit confirmation):
@@ -1571,6 +1580,113 @@ tone forced them open regardless of count.
   above 3 items. 1-3 items keep the existing "clean, nothing to scan past"
   full-card treatment; 4+ is where a card grid stops being scannable and
   the dense list takes over.
+
+## Fixed: KSI `INTERNAL_ONLY` was mis-verdicted as an unconfirmed qualified claim
+
+**The bug, as reported**: an intact KSI seal that reached only
+`INTERNAL_ONLY` (its own hash-chain check passed; neither the key-based
+nor the publication-based external check was reachable) was reported
+`PARTIAL` -- "qualified status could not be confirmed right now" -- and a
+single-item document consisting of only such a seal read as
+`PARTIAL`/amber instead of `TRUSTED`/green.
+
+**Root cause**: a category error in the original verdict-logic fix (see
+"Fixed: overall verdict logic undercounted multi-item trust" above).
+`INTERNAL_ONLY` was mapped to `VerdictReason.UNCONFIRMED` -- the same
+reason an X.509 signature gets when it *claims* to be qualified but that
+claim can't be confirmed (Trusted List/revocation data unavailable). KSI
+never makes a qualified-identity claim at all; it only ever answers one
+question -- has the document been altered since sealing? -- and
+`INTERNAL_ONLY` means that question already came back a conclusive yes,
+intact. Judging it against "is the qualified claim confirmed?" was
+applying the wrong axis, not identifying a real gap.
+
+### The corrected rule
+
+1. An intact KSI seal counts as `TRUSTED` on the integrity axis,
+   regardless of qualified status -- which simply doesn't apply to KSI.
+2. Only a genuinely broken/inconsistent seal (`BROKEN` tier) demotes a KSI
+   item off that axis. "Couldn't reach a stronger external confirmation"
+   is not an integrity failure.
+3. Wording keeps one honest distinction, never a trust-bucket one:
+   `CALENDAR_VERIFIED`/`PUBLICATION_VERIFIED` (a real external check
+   passed) get "independently verified" language; `INTERNAL_ONLY` (intact,
+   but no external check reachable) gets its own honest wording -- never
+   "independently verified" (that would overclaim an external
+   corroboration that didn't happen) and never "qualified" (not this
+   mechanism's claim to begin with).
+4. No KSI path may use the "qualified status could not be confirmed"
+   phrase -- that phrase is reserved for X.509 items that actually claim
+   qualified status. This also caught a second, narrower instance of the
+   same category error: `NOT_VERIFIED` (the tool hasn't even run yet)
+   still correctly stays `UNCONFIRMED`, but `_plain_summary`'s wording for
+   an all-KSI unconfirmed document was rewritten too, so it never borrows
+   the X.509-specific phrase either (`"verification could not be
+   completed right now for N of M seal(s)"` instead).
+5. Mixed documents (a QES + an intact KSI seal) are `TRUSTED`, wording
+   each item on its own terms -- never implying the KSI seal is a
+   failed/partial qualified signature.
+
+### Implementation
+
+- **`VerdictReason.CONFIRMED_INTACT`** (new): intact and internally
+  self-consistent, but no external corroboration reachable. Counts toward
+  `TRUSTED` the same way `CONFIRMED_QUALIFIED`/`CONFIRMED_INDEPENDENT` do;
+  must never be worded as "qualified" or "independently verified".
+- **`_KSI_TIER_VERDICT_REASON[INTERNAL_ONLY]`** changed from
+  `UNCONFIRMED` to `CONFIRMED_INTACT`. `NOT_VERIFIED` is unchanged
+  (`UNCONFIRMED` -- genuinely nothing confirmed yet, not even the internal
+  check).
+- **`VerdictBreakdown.confirmed_intact`** (new field, mirrored in
+  `api/schemas.py`'s `VerdictBreakdownOut`) -- purely additive.
+- **`_overall_verdict`**: `trusted_count` now sums all three confirmed
+  reasons (`confirmed_qualified + confirmed_independent +
+  confirmed_intact`).
+- **`_plain_summary`** rewritten to be three-bucket-aware on the `TRUSTED`
+  side (qualified / independently-verified / intact-only, and every
+  pairwise-or-triple mix), each described in its own terms and joined by
+  `;` rather than lumped under one blanket claim. The `PARTIAL`
+  `unconfirmed` branch is now KSI-vs-X.509-aware too, so an all-KSI
+  unconfirmed document never says "qualified status".
+- **`_KSI_TIER_PLAIN_TEXT[INTERNAL_ONLY]`** rewritten to the honest,
+  positive framing: "This document's KSI seal is intact -- the document
+  hasn't been altered since it was sealed. Independent confirmation
+  against a public record wasn't reachable right now -- ...".
+- **Frontend (`web/src/itemPresentation.js`)**: `itemTone`/`itemBadge`
+  gained a `confirmed_intact` case (tone `TRUSTED`, badge "Intact" --
+  distinct from both "Qualified & confirmed" and "Independently
+  verified"). `internal_only`'s entries in `KSI_TIER_META` and
+  `KSI_LEVEL_BADGE_META` flipped from `PARTIAL`/amber to `TRUSTED`/green,
+  wording changed from "Internally consistent only" to "Intact" (level
+  badge) / "Intact -- no external confirmation reachable yet" (field
+  grid) -- no code path left describing an intact seal as a warning.
+- **8 tests added/corrected** in `core/tests/test_verdict.py` and
+  `core/tests/test_ksi.py`, locking in the decision table:
+  `test_qes_and_internal_only_ksi_seal_is_trusted` (renamed from
+  `..._stays_partial`, now asserts `TRUSTED` with per-item wording);
+  `test_ksi_only_internal_only_is_trusted_without_qualified_or_independent_wording`
+  (single intact `INTERNAL_ONLY` seal -> `TRUSTED`, bare "Trusted"
+  heading, no "qualified"/"independently verified" anywhere);
+  `test_broken_ksi_seal_alone_is_not_trusted` (genuinely broken KSI, only
+  item -> `NOT_TRUSTED`); `test_ksi_only_not_verified_is_partial_without_qualified_wording`
+  (locks in point 4 above); `test_internal_only_when_all_three_checks_are_inconclusive`
+  in `test_ksi.py` updated to assert `CONFIRMED_INTACT` instead of the old
+  `UNCONFIRMED`. The pre-existing `CALENDAR_VERIFIED`/`PUBLICATION_VERIFIED`
+  tests were untouched and still pass byte-for-byte -- this fix only
+  corrects `INTERNAL_ONLY`'s bucket, not the already-correct stronger
+  tiers. 110/110 across `core/` + `api/` combined (was 107; net +3 new
+  tests, one existing assertion corrected in place), zero regressions.
+- **Re-verified against the real `ksi_sample.pdf`** (gitignored, per
+  CLAUDE.md's ephemerality rule -- not committed), with the real `ksi`
+  binary installed (Homebrew `ksi-tools`, not a stub): still lands on
+  `INTERNAL_ONLY` (the GlobalSign trust-chain gap from the original KSI
+  writeup is unchanged), but now returns `verdict: trusted` --
+  `"Trusted — this document's KSI seal is intact, and hasn't been altered
+  since it was sealed. Independent confirmation against a public record
+  wasn't reachable right now."` -- instead of the old `partial`. This is
+  the real-world document the original (buggy) decision table was
+  calibrated against, so this is the concrete case the fix was for, not
+  just a synthetic test.
 
 ## Next: Day 7 -- polish, continued
 
