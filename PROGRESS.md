@@ -1688,6 +1688,67 @@ applying the wrong axis, not identifying a real gap.
   calibrated against, so this is the concrete case the fix was for, not
   just a synthetic test.
 
+## Rebrand: Scrive design system
+
+The frontend was reskinned onto Scrive's brand (colors, type, logo) --
+layout and interaction (collapsed multi-item list, expand/collapse, KSI
+card, badges, six-field grid, "verify it yourself" link) are unchanged; this
+was a token/CSS swap, not a rebuild.
+
+- **`web/src/theme.css` replaced wholesale**: the "Limoncello" palette is
+  gone. Surfaces are Botticelli (`#F2F6F9`)/white, ink is Shark (`#27282D`),
+  interactive text/buttons/links use WCAG Blue (`#1A79CB`) -- Curious Blue
+  (`#1E88E2`) is kept decorative-only per the brand guide's own callout,
+  since it fails contrast as text (~3.7:1 on white). Traffic-light verdicts
+  now map to Scrive's semantic tokens: success (green) -> TRUSTED, warning
+  (yellow) -> PARTIAL, error (red) -> NOT_TRUSTED.
+- **A few tokens are deliberately *derived*, not used verbatim**, each
+  documented inline in `theme.css` with its measured contrast: green-700
+  and red-500 text only reach ~3.4:1 against their own "light" verdict
+  backgrounds, so both are darkened slightly (same hue) to clear 4.5:1.
+  gray-500 is nudged similarly for muted text sitting directly on the page
+  background (no card behind it). Warning was the tricky one -- pale
+  yellow-200 is only ~1.05:1 apart in lightness from the page background
+  and would nearly disappear as a banner fill, so the PARTIAL banner/notice
+  use the bold yellow-500 instead (with Shark text, 11:1), plus a
+  left-border accent for a defined edge; yellow-200 is kept for small
+  badges/chips sitting on a white card, where it reads fine. A separate
+  darkened-gold token (`--verdict-partial-icon`, `#7E711B`) covers the one
+  case where warning needs to read as colored text/icon with no fill behind
+  it (the inline field-value color, the card's left border) -- the raw
+  yellow-500 fails outright there (1.34:1 on white).
+- **Typography**: Fraunces/Manrope -> Montserrat throughout (400/500/700),
+  per the guide. Line-heights are newly paired per size using the guide's
+  own rule (font-size x 1.4, rounded to the nearest 4px) rather than a flat
+  inherited ratio -- `--leading-xs` through `--leading-4xl` in `theme.css`,
+  applied everywhere `font-size` is set in `app.css`.
+- **Logo**: the real `scrive-logo.svg` (the "scrive." wordmark) now lives
+  in `web/public/` and renders in a new `Header.jsx` component above
+  `.app-main`, sized with generous clear space, aspect ratio preserved
+  (`height` fixed, `width: auto`) -- not redrawn, not recolored. The
+  favicon reuses the wordmark's own "s" glyph path (extracted by its
+  bounding box, not hand-traced) centered on a Botticelli rounded square,
+  since the brand only supplies a wordmark and no separate icon mark.
+- **Disclaimer**: final wording landed in two forms, per the project
+  owner. `Footer.jsx` carries the full version -- affiliation
+  ("independent personal project by Monir Gueblaoui... not an official
+  Scrive product or service, and nothing here represents Scrive") folded
+  together with the pre-existing Article 33/not-legal-advice framing --
+  in a bordered card (`.site-footer__disclaimer`, gray-700/text-sm, not
+  muted fine print, since the affiliation point only works if it's
+  actually read). `Landing.jsx` carries a short form ("Beta · an
+  independent personal project, not an official Scrive product.") as a
+  visible pill directly under the headline (`.landing__disclaimer`,
+  blue-subtle background, Sapphire text, 7.76:1 contrast).
+- **Verified locally** (`uvicorn` + `vite dev`, real `qes_document.pdf`,
+  `ksi_sample.pdf`, and a fresh 8-signer fixture built from `core/tests`'
+  own signing helpers -- 3 clean-qualified, 1 tampered, 1
+  unregistered-qualified/unconfirmed, 3 advanced) via `puppeteer-core`
+  driving real Chrome, at both a 1280px desktop and 390px mobile viewport,
+  collapsed and fully expanded. All four verdict tones (trusted/partial/
+  not-trusted/neutral) render legibly in both the banner and inline
+  field-value contexts.
+
 ## Next: Day 7 -- polish, continued
 
 1. Review the new KSI card design on the live Railway URL against a

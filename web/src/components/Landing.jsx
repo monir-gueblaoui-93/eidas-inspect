@@ -1,6 +1,6 @@
 import UploadZone from './UploadZone.jsx'
 import ErrorNotice from './ErrorNotice.jsx'
-import { IconShieldCheck } from '../icons.jsx'
+import { IconInfoCircle, IconShieldCheck } from '../icons.jsx'
 
 export default function Landing({ onFileSelected, error }) {
   return (
@@ -8,6 +8,10 @@ export default function Landing({ onFileSelected, error }) {
       <h1 className="landing__headline">
         Check if your signed document is <em>genuinely</em> valid.
       </h1>
+      <p className="landing__disclaimer">
+        <IconInfoCircle size={16} />
+        Beta · an independent personal project, not an official Scrive product.
+      </p>
       <p className="landing__subhead">
         Upload a signed or sealed PDF and get a plain-language verdict on whether it's
         real, intact, and qualified under EU eIDAS rules — no jargon, no account.

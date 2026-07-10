@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react'
+import Header from './components/Header.jsx'
 import Landing from './components/Landing.jsx'
 import PasswordPrompt from './components/PasswordPrompt.jsx'
 import VerifyingAnimation from './components/VerifyingAnimation.jsx'
@@ -93,6 +94,7 @@ export default function App() {
 
   return (
     <div className="app-shell">
+      <Header />
       <main className={`app-main${isWideResult ? ' app-main--wide' : ''}`}>
         {phase === 'landing' && <Landing onFileSelected={handleFileSelected} error={uploadError} />}
         {phase === 'password' && (

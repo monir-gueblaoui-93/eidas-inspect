@@ -1,90 +1,138 @@
 /*
- * Design tokens for eidas-inspect — "Limoncello" palette.
+ * Design tokens for eidas-inspect — Scrive design system.
  *
- * Pale lemon-cream surfaces, olive ink, bright lemon accent. The accent is
- * a UI-interaction color only (buttons, focus, selected states) — it fails
- * WCAG contrast as a foreground color on these light surfaces (~1.4:1), so
- * it is never used for text, icons, or borders on their own; those read
- * against --color-focus (an amber-brown, ~3.1:1, meant for exactly this)
- * or the dark olive tokens instead. Verdict colors are a separate family
- * on purpose (rule: lemon never appears inside a verdict chip or banner —
- * amber/honey is PARTIAL's color, not the brand's).
+ * Source of truth: Scrive's brand palette (Shark / Botticelli / WCAG Blue /
+ * gray scale) with the traffic-light verdict families remapped onto
+ * Scrive's semantic success/warning/error tokens. A few values are
+ * deliberately *derived* from the brand hex triplets rather than used
+ * verbatim, always by keeping the same hue and nudging lightness only,
+ * because the raw triplets don't all clear WCAG AA in every role they're
+ * used in here — each derivation is called out below with its measured
+ * contrast ratio.
  *
- * Type pairing unchanged: Fraunces (display) + Manrope (body).
+ * - Curious Blue (#1E88E2) is decorative only — it fails WCAG contrast as
+ *   text (~3.7:1 on white). WCAG Blue (#1A79CB) is the interactive color
+ *   (text/links/buttons) instead, per the brand guide's own callout.
+ * - green-700/red-500, used as-given, only reach ~3.4:1 against their own
+ *   "light" verdict backgrounds (green-200/red-100) — short of the 4.5:1
+ *   normal-text floor. Both are darkened slightly (same hue) below until
+ *   they clear 4.5:1 on those backgrounds with margin.
+ * - Warning is the tricky family: pale yellow-200 is only ~1.05:1 different
+ *   in lightness from the page background (Botticelli), i.e. it would all
+ *   but disappear as a banner fill. The bold yellow-500 is used for the
+ *   PARTIAL banner/notice fill instead (with Shark text, 11:1), and a
+ *   darkened gold is derived for the one case where warning needs to read
+ *   as colored *text* on a plain white surface (no fill behind it).
  */
 
 :root {
   /* ---- Surfaces ---- */
-  --color-bg: #fdfbef; /* page background — pale lemon-cream */
-  --color-surface: #fffffc; /* cards, elevated panels */
-  --color-surface-sunken: #f6f3df; /* drop zone idle, subtle wells */
+  --color-bg: #f2f6f9; /* Botticelli — page background */
+  --color-surface: #ffffff; /* cards, elevated panels */
+  --color-surface-sunken: #e9ebee; /* gray-200 Solitude — subtle wells */
 
-  /* ---- Text: olive ink hierarchy ---- */
-  --color-text: #3a3d28; /* primary */
-  --color-text-secondary: #6e7154;
-  --color-text-muted: #737459; /* darkened from spec's #8F916F (3.1:1) to
-    clear 4.5:1 on --color-bg/--color-surface for small text — same hue,
-    lightness only, per the "keep hue, darken text" contrast rule. */
+  /* ---- Text: Shark ink hierarchy ---- */
+  --color-text: #27282d; /* gray-900 / Shark — primary */
+  --color-text-secondary: #3e494b; /* gray-700 Outer Space */
+  --color-text-muted: #686f7e; /* gray-500 Dark Gray, nudged from #6a7281 —
+    the raw value clears 4.5:1 on white (4.84:1) but falls just short
+    (4.46:1) directly on --color-bg (Botticelli), where footer/status text
+    sits with no card behind it. Same hue, minimal lightness change: now
+    4.64:1 on --color-bg, 5.04:1 on white. */
 
   /* ---- Borders ---- */
-  --color-border: #e3e0c8;
-  --color-border-strong: #c9c6a5;
+  --color-border: #d8e1eb; /* gray-300 Casper — subtle dividers, decorative */
+  --color-border-strong: #6a7281; /* gray-500 Dark Gray — functional borders
+    (inputs, buttons, dashed drop zone) that need to read as a real edge;
+    gray-400 (#97A0AA, 2.65:1 on white) falls short of the 3:1 non-text
+    floor for that role, so gray-500 (4.84:1) is used instead. */
 
-  /* ---- Accent: bright lemon — interactive elements only ---- */
-  --color-accent: #f2d42b;
-  --color-accent-hover: #e5c51b;
-  --color-accent-active: #d4b614;
-  --color-on-accent: #4a3d04; /* text/icons on lemon — never white */
-  --color-accent-subtle: #fbf3c8; /* focus tints, selected states */
+  /* ---- Interactive blue: WCAG Blue only, on text/buttons/links ---- */
+  --color-blue: #1a79cb; /* WCAG Blue — 4.52:1 on white */
+  --color-blue-hover: #274790; /* Sapphire (blue-700) — hover, extra margin (8.79:1) */
+  --color-blue-active: #213654; /* Cello (blue-900) — pressed, deepest step of the scale */
+  --color-blue-decorative: #1e88e2; /* Curious Blue — decorative only, never text or buttons */
+  --color-blue-subtle: #e9f2fa; /* Lavender — tints, focus backgrounds, selected states */
+  --color-on-blue: #ffffff;
 
-  /* ---- Focus ring: amber-brown, not lemon (lemon fails 3:1 on cream) ---- */
-  --color-focus: #b08a2e;
+  --color-gold: #f1c40f; /* Gold tips — sparing accent, not a UI workhorse color */
 
-  /* ---- Verdict: TRUSTED — fresh, saturated green: this is the
-     celebratory state, so it's deliberately punchier than the other
-     verdict families (which stay as-is) rather than matching their
-     paleness. All combinations below keep or exceed the previous WCAG AA
-     margins (verified: bg/text 8.17:1, bg/icon 4.27:1, bg-strong/text
-     7.36:1 — text comfortably clears the 4.5:1 normal-text floor,
-     icon/border comfortably clear the 3:1 non-text floor). ---- */
-  --verdict-trusted-bg: #d2eebd;
-  --verdict-trusted-bg-strong: #bfe6a2; /* the "Qualified"/"Independently
-    verified" badge fill and the trusted banner's icon backdrop — a
-    punchier fill than --verdict-trusted-bg, reserved for the one or two
-    elements on a card that should visually pop hardest. */
-  --verdict-trusted-border: #3f9c2a;
-  --verdict-trusted-text: #1e4a15;
-  --verdict-trusted-icon: #2c7a1c;
+  /* ---- Focus ring: WCAG Blue clears 3:1 on both white (4.52) and
+     --color-bg (4.16), so it doubles as the focus indicator directly —
+     no separate compromise color needed here. ---- */
+  --color-focus: #1a79cb;
 
-  /* ---- Verdict: PARTIAL — deep honey, pushed brown so it never reads as the lemon accent ---- */
-  --verdict-partial-bg: #f1e3be;
-  --verdict-partial-border: #b08a2e;
-  --verdict-partial-text: #6f5410;
-  --verdict-partial-icon: #8a6a14;
+  /* ---- Verdict: TRUSTED (Scrive "success") ---- */
+  --verdict-trusted-bg: #99c9a7; /* green-200 Eucalyptus */
+  --verdict-trusted-bg-strong: #1b6d2f; /* green-700 Camarone, solid — the
+    "Qualified"/"Independently verified" pop badge and trusted icon
+    backdrop; pair with --verdict-trusted-on-strong (white), not
+    --verdict-trusted-text, since this fill is much darker than the plain
+    verdict-trusted-bg tint. */
+  --verdict-trusted-on-strong: #ffffff; /* 6.41:1 on --verdict-trusted-bg-strong */
+  --verdict-trusted-border: #20883e; /* green-500 — 4.51:1 on white, clears
+    the 3:1 non-text floor for card borders with margin */
+  --verdict-trusted-text: #165726; /* green-700, darkened from #1B6D2F
+    (3.44:1 on --verdict-trusted-bg — short of 4.5:1) to 4.65:1; same hue,
+    darker only. Also used standalone on white (8.66:1). */
+  --verdict-trusted-icon: #165726;
 
-  /* ---- Verdict: NOT_TRUSTED ---- */
-  --verdict-danger-bg: #f4dcd4;
-  --verdict-danger-border: #c05238;
-  --verdict-danger-text: #8e3320;
-  --verdict-danger-icon: #a73e27;
+  /* ---- Verdict: PARTIAL (Scrive "warning") ---- */
+  --verdict-partial-bg: #ffde00; /* yellow-500 School Bus Yellow — bold
+    banner/notice fill. Deliberately NOT yellow-200: that pale tint is only
+    ~1.05:1 different in lightness from --color-bg and would read as barely
+    distinguishable from the plain page background. */
+  --verdict-partial-bg-subtle: #fff299; /* yellow-200 Canary — small badges/
+    chips sitting on a white card, where the pale tint reads fine against
+    a neutral card rather than the page background. */
+  --verdict-partial-text: #27282d; /* Shark — 11.0:1 on partial-bg, 12.9:1
+    on partial-bg-subtle. Used wherever this pairs with its own yellow
+    fill (banner, notice, badges). */
+  --verdict-partial-icon: #7e711b; /* darkened gold, derived from yellow-500
+    (1.34:1 on white as-is — fails outright) for the one role where warning
+    needs to read as *colored text/icon* with no fill behind it (the
+    inline field-value color, the card's left border): 4.92:1 on white. */
+  --verdict-partial-border: #7e711b;
+
+  /* ---- Verdict: NOT_TRUSTED (Scrive "error") ---- */
+  --verdict-danger-bg: #f9ccd9; /* red-100 Pale Pink */
+  --verdict-danger-bg-strong: #e00040; /* red-500 Torch Red, solid — pair
+    with --verdict-danger-on-strong (white): 4.95:1 */
+  --verdict-danger-on-strong: #ffffff;
+  --verdict-danger-border: #e00040; /* 4.95:1 on white */
+  --verdict-danger-text: #bb0036; /* red-500, darkened from #E00040
+    (3.46:1 on --verdict-danger-bg — short of 4.5:1) to 4.63:1; same hue,
+    darker only. Also used standalone on white (6.63:1). */
+  --verdict-danger-icon: #bb0036;
 
   /* ---- Verdict: NO_SIGNATURES — neutral, not an error ---- */
-  --verdict-neutral-bg: #efeee2;
-  --verdict-neutral-border: #b9b69a;
-  --verdict-neutral-text: #5b5e44;
+  --verdict-neutral-bg: #e9ebee; /* gray-200 Solitude */
+  --verdict-neutral-border: #6a7281; /* gray-500 */
+  --verdict-neutral-text: #3e494b; /* gray-700 — 7.78:1 on neutral-bg, 9.29:1 on white */
 
-  /* ---- Type ---- */
-  --font-display: 'Fraunces', ui-serif, Georgia, serif;
-  --font-body: 'Manrope', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  /* ---- Type: Montserrat throughout, per the Scrive guide ---- */
+  --font-display: 'Montserrat', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-body: 'Montserrat', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 
-  --text-xs: 0.8125rem;
-  --text-sm: 0.9375rem;
-  --text-base: 1rem;
-  --text-lg: 1.125rem;
-  --text-xl: 1.375rem;
-  --text-2xl: 1.75rem;
-  --text-3xl: 2.25rem;
-  --text-4xl: 3rem;
+  /* Sizes stay the app's existing scale (rem, unchanged from before this
+     reskin); line-heights are newly paired per the guide's rule — font
+     size × 1.4, rounded to the nearest 4px, then expressed in rem. */
+  --text-xs: 0.8125rem; /* 13px */
+  --leading-xs: 1.25rem; /* 13 × 1.4 = 18.2 → 20px */
+  --text-sm: 0.9375rem; /* 15px */
+  --leading-sm: 1.25rem; /* 15 × 1.4 = 21 → 20px */
+  --text-base: 1rem; /* 16px */
+  --leading-base: 1.5rem; /* 16 × 1.4 = 22.4 → 24px (the guide's own example) */
+  --text-lg: 1.125rem; /* 18px */
+  --leading-lg: 1.5rem; /* 18 × 1.4 = 25.2 → 24px */
+  --text-xl: 1.375rem; /* 22px */
+  --leading-xl: 2rem; /* 22 × 1.4 = 30.8 → 32px */
+  --text-2xl: 1.75rem; /* 28px */
+  --leading-2xl: 2.5rem; /* 28 × 1.4 = 39.2 → 40px */
+  --text-3xl: 2.25rem; /* 36px */
+  --leading-3xl: 3.25rem; /* 36 × 1.4 = 50.4 → 52px */
+  --text-4xl: 3rem; /* 48px */
+  --leading-4xl: 4.25rem; /* 48 × 1.4 = 67.2 → 68px */
 
   /* ---- Spacing scale ---- */
   --space-1: 4px;
@@ -103,8 +151,8 @@
   --radius-lg: 24px;
   --radius-pill: 999px;
 
-  --shadow-card: 0 1px 2px rgba(58, 61, 40, 0.06), 0 4px 16px rgba(58, 61, 40, 0.07);
-  --shadow-pop: 0 12px 32px rgba(58, 61, 40, 0.16);
+  --shadow-card: 0 1px 2px rgba(39, 40, 45, 0.06), 0 4px 16px rgba(39, 40, 45, 0.07);
+  --shadow-pop: 0 12px 32px rgba(39, 40, 45, 0.16);
 
   --container-width: 760px;
   --container-width-wide: 1040px; /* the result view, only once there's
