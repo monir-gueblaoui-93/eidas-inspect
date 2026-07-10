@@ -1436,6 +1436,83 @@ explicit confirmation):
   reads honestly, just not with a dedicated label. A v2 candidate, not a
   correctness bug.
 
+## Done: verdict page frontend polish (five related improvements)
+
+Frontend-only -- no verdict logic touched, per instruction. All five
+items verified in a real browser (a multi-signer fixture, a single QES,
+and a KSI seal, at desktop and mobile widths) via `puppeteer-core`
+driving local Chrome against `web/dist`'s production build served
+through a locally stub-wired API (real HTTP, real upload, not a mocked
+render) -- see this section's last bullet for how that stub was set up.
+
+1. **Multi-item layout**: `SignatureCard` gained a `collapsible` mode.
+   Multiple items render as compact, clickable summary rows (type,
+   level/tier badge, signer name, a plain Valid/Invalid chip, the
+   existing status badge) in a responsive grid
+   (`grid-template-columns: repeat(auto-fit, minmax(300px, 1fr))`,
+   paired with a wider `.app-main--wide` container used only for this
+   phase) -- collapsed rows sit side by side on a wide viewport and
+   stack to one column under 720px. An item defaults *expanded* when it
+   needs attention (`not-trusted`/`partial` tone, same rule the
+   technical-details drawer already used), so a genuine problem is
+   never hidden behind a click. An expanded item spans the full grid
+   row (`grid-column: 1 / -1`) so its full body has real width. A
+   single-item document skips `collapsible` entirely and always shows
+   the full card -- unchanged from before, just with the new identity
+   strip (next item).
+2. **Trusted green, strengthened**: new, more saturated
+   `--verdict-trusted-*` tokens plus a `--verdict-trusted-bg-strong`
+   token for the one or two elements that should pop hardest (the
+   Qualified/Independently-verified badge, the trusted banner's icon
+   backdrop). Verified by computing WCAG contrast ratios directly
+   (not eyeballed): bg/text 8.17:1, bg/icon 4.27:1, bg-strong/text
+   7.36:1 -- all clear AA's 4.5:1 (text) / 3:1 (non-text) floors with
+   room to spare, exceeding the previous (already-passing) ratios.
+   Partial/danger tokens untouched, so amber/red stay exactly as
+   distinct from both each other and the lemon accent as before.
+3. **Level badge, prominent**: `levelDisplay`'s `Qualified` case now
+   carries an icon (`IconShieldCheck`) and a `strong: true` flag driving
+   the punchier fill; `Advanced`/`Basic` stay the plain tone-colored
+   pill. Promoted out of the field grid into a new always-visible
+   identity strip at the top of every card (single or multi-item).
+4. **Signer, prominent**: the same identity strip shows `whoDisplay`'s
+   "Signed by X"/"Sealed by X" text directly beside the level badge --
+   the two things the task asked to be first-glance facts. Issuer/TSP
+   stays in its existing, separate `IssuerRow` as supporting detail,
+   unchanged.
+5. **`CONFIRMED_INDEPENDENT` handled**: `itemTone`/`itemBadge` gained an
+   explicit case (was silently falling to the neutral default) --
+   tone `TRUSTED` (same green family as `Qualified`), badge text
+   "Independently verified" (never "Qualified"). New
+   `ksiLevelBadgeDisplay` mirrors `levelDisplay`'s shape for the
+   identity strip specifically (`CALENDAR_VERIFIED`/
+   `PUBLICATION_VERIFIED` -> "Independently verified", `strong: true`,
+   same fill as Qualified); the existing, more detailed `ksiTierDisplay`
+   (used in the field grid) is unchanged except fixing `CALENDAR_VERIFIED`'s
+   own tone from `NEUTRAL` to `TRUSTED` -- a real inconsistency this
+   task surfaced, now that core treats both KSI tiers as the same trust
+   bucket.
+   - **A real bug this pass also caught**: `VerdictBanner`'s heading was
+     a static per-verdict label ("Fully trusted" for every `trusted`
+     verdict), completely overriding core's own careful "Trusted" vs.
+     "Fully trusted" distinction (the KSI-only wording from the verdict-logic
+     fix, deliberately never claiming "qualified") in the one place users
+     read first. Fixed: the heading is now derived from `plain_summary`'s
+     own text, falling back to the static label only when there's no
+     em-dash to split on.
+- **Visual QA harness** (scratchpad only, not committed): a small script
+  builds three real PDFs (single QES, a genuinely mixed two-signer
+  document, a KSI seal) and serves them through `create_app()` wired
+  with a seeded Trusted List snapshot, a clean CRL, and a stub
+  `KsiToolRunner` reaching `PUBLICATION_VERIFIED` -- then `puppeteer-core`
+  drives real Chrome through the actual upload flow against that server,
+  at both a desktop and a mobile viewport, screenshotting the result.
+  Confirmed: the responsive grid, the collapse/expand interaction (both
+  directions), the strengthened green, the Qualified/Independently-verified
+  badges side by side in a two-item grid, and the corrected banner
+  heading -- all rendering as designed, not just passing a lint/build
+  check.
+
 ## Next: Day 7 -- polish, continued
 
 1. Review the new KSI card design on the live Railway URL against a

@@ -79,6 +79,13 @@ input {
   padding: var(--space-7) var(--space-4) var(--space-6);
 }
 
+/* Only the multi-item result view opts into this -- landing, upload,
+   password, and verifying phases all stay at the narrower reading
+   width. */
+.app-main--wide {
+  max-width: var(--container-width-wide);
+}
+
 @media (max-width: 640px) {
   .app-main {
     padding: var(--space-6) var(--space-4) var(--space-5);
@@ -436,11 +443,44 @@ input {
   color: var(--verdict-neutral-text);
 }
 
+.verdict-banner__icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* The one deliberately celebratory flourish: a filled, punchier-green
+   circle behind the trusted checkmark. Other tones keep the plain icon --
+   this is the state that's supposed to feel like good news landing. */
+.verdict-banner--trusted .verdict-banner__icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--verdict-trusted-bg-strong);
+  color: var(--verdict-trusted-icon);
+}
+
 /* ---------- Signature cards ---------- */
 .result-view__cards {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: 1fr;
   gap: var(--space-4);
+}
+
+/* Multi-item documents get room to breathe sideways (paired with
+   .app-main--wide, see app.css/App.jsx) instead of one long single-file
+   column -- auto-fit so 2-3 collapsed rows sit side by side on a wide
+   viewport, however many actually fit, and collapse to one column below
+   it (belt-and-suspenders with the explicit mobile breakpoint). */
+.result-view__cards--multi {
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+}
+
+@media (max-width: 720px) {
+  .result-view__cards--multi {
+    grid-template-columns: 1fr;
+  }
 }
 
 .sig-card {
@@ -467,13 +507,34 @@ input {
   border-left-color: var(--verdict-neutral-border);
 }
 
-.sig-card__header {
+/* An expanded card in a multi-item grid takes the full row -- its body
+   (fields grid, certificate, technical drawer) needs real width, not a
+   narrow grid column. */
+.sig-card--collapsible.sig-card--expanded {
+  grid-column: 1 / -1;
+}
+
+.sig-card__summary {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  margin-bottom: var(--space-3);
   flex-wrap: wrap;
+  gap: var(--space-3);
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+}
+
+.sig-card--collapsible .sig-card__summary {
+  cursor: pointer;
+}
+
+.sig-card__summary:not(:last-child) {
+  margin-bottom: var(--space-3);
 }
 
 .sig-card__type {
@@ -485,12 +546,78 @@ input {
   font-weight: 600;
 }
 
+/* ---------- Level / KSI-tier badge -- tasks 3 & 5's prominent slot ---------- */
+.sig-card__level-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 700;
+  font-size: var(--text-sm);
+  padding: 5px 14px;
+  border-radius: var(--radius-pill);
+}
+
+.sig-card__level-badge--trusted {
+  background: var(--verdict-trusted-bg);
+  color: var(--verdict-trusted-text);
+}
+
+/* Qualified / Independently verified: the single strongest-weight claim a
+   card can make -- the punchier fill (same token the trusted banner's
+   icon backdrop uses) plus a small lift, so it visually outranks every
+   other badge on the card at a glance. */
+.sig-card__level-badge--trusted.sig-card__level-badge--strong {
+  background: var(--verdict-trusted-bg-strong);
+  box-shadow: 0 1px 3px rgba(58, 61, 40, 0.14);
+}
+
+.sig-card__level-badge--partial {
+  background: var(--verdict-partial-bg);
+  color: var(--verdict-partial-text);
+}
+
+.sig-card__level-badge--not-trusted {
+  background: var(--verdict-danger-bg);
+  color: var(--verdict-danger-text);
+}
+
+.sig-card__level-badge--neutral {
+  background: var(--verdict-neutral-bg);
+  color: var(--verdict-neutral-text);
+}
+
+.sig-card__summary-signer {
+  font-weight: 700;
+  font-size: var(--text-sm);
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+.sig-card__validity {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 700;
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.sig-card__validity--valid {
+  color: var(--verdict-trusted-icon);
+}
+
+.sig-card__validity--invalid {
+  color: var(--verdict-danger-icon);
+}
+
 .sig-card__badge {
   font-size: var(--text-xs);
   font-weight: 700;
   padding: 4px 12px;
   border-radius: var(--radius-pill);
   white-space: nowrap;
+  margin-left: auto;
 }
 
 .sig-card__badge--trusted {
@@ -511,6 +638,16 @@ input {
 .sig-card__badge--neutral {
   background: var(--verdict-neutral-bg);
   color: var(--verdict-neutral-text);
+}
+
+.sig-card__summary-chevron {
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+  transition: transform 0.15s ease;
+}
+
+.sig-card__summary-chevron.is-open {
+  transform: rotate(180deg);
 }
 
 .sig-card__lead {

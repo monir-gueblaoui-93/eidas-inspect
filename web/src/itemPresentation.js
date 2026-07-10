@@ -12,6 +12,7 @@ import {
   IconXCircle,
   IconInfoCircle,
   IconLink,
+  IconShieldCheck,
 } from './icons.jsx'
 
 const TONE = {
@@ -51,6 +52,7 @@ export function isKsiSeal(item) {
 export function itemTone(item) {
   switch (item.verdict_reason) {
     case 'confirmed_qualified':
+    case 'confirmed_independent':
       return TONE.TRUSTED
     case 'broken':
     case 'tampered':
@@ -68,6 +70,12 @@ export function itemBadge(item) {
   switch (item.verdict_reason) {
     case 'confirmed_qualified':
       return 'Qualified & confirmed'
+    case 'confirmed_independent':
+      // Deliberately not "Qualified" -- a well-verified KSI seal is a real
+      // positive result via a different trust mechanism, not an eIDAS
+      // qualification claim. Same green-family weight as "Qualified &
+      // confirmed" (see itemTone above), distinct label.
+      return 'Independently verified'
     case 'broken':
       return 'Broken'
     case 'tampered':
@@ -86,10 +94,10 @@ export function itemBadge(item) {
 export function levelDisplay(item) {
   if (item.level === 'qualified') {
     const termKey = item.type === 'seal' ? 'qseal' : item.type === 'signature' ? 'qes' : 'qualified'
-    return { text: 'Qualified', tone: TONE.TRUSTED, termKey }
+    return { text: 'Qualified', tone: TONE.TRUSTED, termKey, icon: IconShieldCheck, strong: true }
   }
   if (item.level === 'advanced') return { text: 'Advanced', tone: TONE.NEUTRAL }
-  if (item.level === 'basic') return { text: 'Basic', tone: TONE.NOT_TRUSTED }
+  if (item.level === 'basic') return { text: 'Basic', tone: TONE.NOT_TRUSTED, icon: IconAlertTriangle }
   return { text: 'Unknown', tone: TONE.NEUTRAL }
 }
 
@@ -302,8 +310,13 @@ const KSI_TIER_META = {
     text: 'Internally consistent only',
   },
   calendar_verified: {
+    // tone TRUSTED, not NEUTRAL: core's verdict_reason for this tier is
+    // CONFIRMED_INDEPENDENT (a real cryptographic check against the
+    // sealing infrastructure's own certificate actually passed), the same
+    // trust bucket PUBLICATION_VERIFIED is in -- just a different, weaker
+    // independent anchor. Was NEUTRAL before that backend fix landed.
     icon: IconCheckCircle,
-    tone: TONE.NEUTRAL,
+    tone: TONE.TRUSTED,
     text: "Checked against the sealer's own certificate",
   },
   publication_verified: {
@@ -318,12 +331,53 @@ const KSI_TIER_META = {
   },
 }
 
+/** Detailed, tier-specific wording for the card's "Verification" grid
+ * field -- distinguishes *how* a KSI seal was independently confirmed
+ * (calendar cert vs. publication record). See ksiLevelBadgeDisplay below
+ * for the separate, deliberately blunter label used in the prominent
+ * level-equivalent badge. */
 export function ksiTierDisplay(item) {
   return KSI_TIER_META[item.ksi_verification_tier] || {
     icon: IconInfoCircle,
     tone: TONE.NEUTRAL,
     text: 'Unknown',
   }
+}
+
+/** KSI's level-equivalent badge -- occupies the same prominent slot
+ * levelDisplay's "Qualified"/"Advanced"/"Basic" badge does for an X.509
+ * item, but a KSI seal has no eIDAS level at all, so this is a distinct
+ * label set, not a re-skin: CALENDAR_VERIFIED/PUBLICATION_VERIFIED both
+ * read "Independently verified" (same strong, green-family weight as
+ * "Qualified" -- never the word "qualified" itself). The grid's
+ * "Verification" field (ksiTierDisplay above) keeps the more detailed,
+ * tier-specific wording; this is the blunter, glanceable version. */
+const KSI_LEVEL_BADGE_META = {
+  not_verified: { icon: IconInfoCircle, tone: TONE.NEUTRAL, text: 'Not yet verified' },
+  internal_only: { icon: IconAlertTriangle, tone: TONE.PARTIAL, text: 'Internally consistent only' },
+  calendar_verified: {
+    icon: IconShieldCheck,
+    tone: TONE.TRUSTED,
+    text: 'Independently verified',
+    strong: true,
+  },
+  publication_verified: {
+    icon: IconShieldCheck,
+    tone: TONE.TRUSTED,
+    text: 'Independently verified',
+    strong: true,
+  },
+  broken: { icon: IconXCircle, tone: TONE.NOT_TRUSTED, text: 'Broken' },
+}
+
+export function ksiLevelBadgeDisplay(item) {
+  return (
+    KSI_LEVEL_BADGE_META[item.ksi_verification_tier] || {
+      icon: IconInfoCircle,
+      tone: TONE.NEUTRAL,
+      text: 'Unknown',
+    }
+  )
 }
 
 export function ksiSealedDisplay(item) {

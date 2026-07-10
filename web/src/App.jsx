@@ -89,9 +89,11 @@ export default function App() {
     }
   }
 
+  const isWideResult = phase === 'result' && result?.items?.length > 1
+
   return (
     <div className="app-shell">
-      <main className="app-main">
+      <main className={`app-main${isWideResult ? ' app-main--wide' : ''}`}>
         {phase === 'landing' && <Landing onFileSelected={handleFileSelected} error={uploadError} />}
         {phase === 'password' && (
           <PasswordPrompt

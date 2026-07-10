@@ -40,11 +40,21 @@
   /* ---- Focus ring: amber-brown, not lemon (lemon fails 3:1 on cream) ---- */
   --color-focus: #b08a2e;
 
-  /* ---- Verdict: TRUSTED — fresh green, cooler than any olive UI element ---- */
-  --verdict-trusted-bg: #e6f0dc;
-  --verdict-trusted-border: #4c7c3a;
-  --verdict-trusted-text: #2e5122;
-  --verdict-trusted-icon: #3a632b;
+  /* ---- Verdict: TRUSTED — fresh, saturated green: this is the
+     celebratory state, so it's deliberately punchier than the other
+     verdict families (which stay as-is) rather than matching their
+     paleness. All combinations below keep or exceed the previous WCAG AA
+     margins (verified: bg/text 8.17:1, bg/icon 4.27:1, bg-strong/text
+     7.36:1 — text comfortably clears the 4.5:1 normal-text floor,
+     icon/border comfortably clear the 3:1 non-text floor). ---- */
+  --verdict-trusted-bg: #d2eebd;
+  --verdict-trusted-bg-strong: #bfe6a2; /* the "Qualified"/"Independently
+    verified" badge fill and the trusted banner's icon backdrop — a
+    punchier fill than --verdict-trusted-bg, reserved for the one or two
+    elements on a card that should visually pop hardest. */
+  --verdict-trusted-border: #3f9c2a;
+  --verdict-trusted-text: #1e4a15;
+  --verdict-trusted-icon: #2c7a1c;
 
   /* ---- Verdict: PARTIAL — deep honey, pushed brown so it never reads as the lemon accent ---- */
   --verdict-partial-bg: #f1e3be;
@@ -97,4 +107,7 @@
   --shadow-pop: 0 12px 32px rgba(58, 61, 40, 0.16);
 
   --container-width: 760px;
+  --container-width-wide: 1040px; /* the result view, only once there's
+    more than one item to lay out side by side — every other phase
+    (landing, upload, password, verifying) stays at --container-width. */
 }

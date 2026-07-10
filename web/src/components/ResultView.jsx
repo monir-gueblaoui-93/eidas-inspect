@@ -17,9 +17,9 @@ export default function ResultView({ result, onReset }) {
         breakdown={result.verdict_breakdown}
       />
 
-      <div className="result-view__cards">
+      <div className={`result-view__cards${result.items.length > 1 ? ' result-view__cards--multi' : ''}`}>
         {result.items.map((item, index) => (
-          <SignatureCard key={index} item={item} />
+          <SignatureCard key={index} item={item} collapsible={result.items.length > 1} />
         ))}
       </div>
 
