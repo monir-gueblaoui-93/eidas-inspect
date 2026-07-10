@@ -1391,9 +1391,27 @@ def _plain_summary(
                 f"right now for {breakdown.unconfirmed} of {total} {noun}."
             )
         if x509_unconfirmed and not ksi_unconfirmed:
+            # This is an honest gap, not a deficiency in the signature
+            # itself -- every item counted here already passed the BROKEN/
+            # TAMPERED/REVOKED/NOT_TRUSTED checks above (see
+            # _verdict_reason_for_item's priority order), so the signature
+            # itself is genuinely valid. The only open question is whether
+            # the issuing provider's qualified status can be confirmed
+            # against the EU Trusted List right now, which is usually a
+            # transient TL-fetch gap (a member state's list temporarily
+            # unreachable), not anything wrong with the document. Leads with
+            # that reassurance instead of a bare "could not be confirmed",
+            # which reads as if the signatures themselves were suspect.
+            if total == 1:
+                return (
+                    f"Valid {noun} — the EU Trusted List check is "
+                    "temporarily unavailable, so qualified status couldn't "
+                    "be confirmed right now."
+                )
             return (
-                "Partially trusted — qualified status could not be confirmed "
-                f"right now for {breakdown.unconfirmed} of {total} {noun}."
+                f"Valid {noun} — the EU Trusted List check is temporarily "
+                "unavailable, so qualified status couldn't be confirmed "
+                f"right now for {breakdown.unconfirmed} of {total}."
             )
         # A genuine mix of both unconfirmed flavors -- avoid "qualified" as
         # a blanket claim over items that never made that claim at all.

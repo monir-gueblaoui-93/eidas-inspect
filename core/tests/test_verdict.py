@@ -122,13 +122,47 @@ def test_valid_but_trust_list_unavailable_is_partial_with_unconfirmed_wording(
     result = verify_pdf(qes_signed_pdf, trust_list=degraded)
 
     assert result.verdict == VerificationVerdict.PARTIAL
-    assert 'could not be confirmed' in result.plain_summary
+    assert "couldn't be confirmed" in result.plain_summary
     assert 'issues' not in result.plain_summary
+    # Leads with "Valid signature" (reassurance), not a bare "could not be
+    # confirmed" -- this is an honest TL-availability gap, not a defect in
+    # the signature itself, and the wording shouldn't read as if it were.
     assert result.plain_summary == (
-        "Partially trusted — qualified status could not be confirmed right "
-        "now for 1 of 1 signature."
+        "Valid signature — the EU Trusted List check is temporarily "
+        "unavailable, so qualified status couldn't be confirmed right now."
     )
     assert result.verdict_breakdown.unconfirmed == 1
+    assert result.verdict_breakdown.issues == 0
+
+
+def test_multiple_valid_signatures_all_unconfirmed_is_partial_with_plural_wording():
+    # The real-world shape reported live: several genuinely valid,
+    # genuinely qualified co-signers, all UNCONFIRMED purely because the
+    # EU Trusted List snapshot is degraded (e.g. one member state's list
+    # failed to fetch this cycle) -- not a regression, not a problem with
+    # any of the signatures. Locks in the plural "N of M" wording.
+    ca_key, ca_subject, ca_cert_cx = generate_ca()
+    alice, _ = generate_ca_issued_signer(
+        ca_key, ca_subject, ca_cert_cx, common_name='Alice',
+        qc_compliance=True, qc_sscd=True, qc_type_oid=QC_TYPE_ESIGN_OID,
+    )
+    bob, _ = generate_ca_issued_signer(
+        ca_key, ca_subject, ca_cert_cx, common_name='Bob',
+        qc_compliance=True, qc_sscd=True, qc_type_oid=QC_TYPE_ESIGN_OID,
+    )
+    once = sign_pdf_bytes(build_minimal_pdf(), alice, field_name='Signature1')
+    twice = sign_pdf_bytes(once, bob, field_name='Signature2')
+    degraded = degraded_snapshot(registry_with_granted_ca(_asn1(ca_cert_cx)))
+
+    result = verify_pdf(twice, trust_list=degraded)
+
+    assert result.verdict == VerificationVerdict.PARTIAL
+    assert result.plain_summary == (
+        "Valid signatures — the EU Trusted List check is temporarily "
+        "unavailable, so qualified status couldn't be confirmed right now "
+        "for 2 of 2."
+    )
+    assert result.verdict_breakdown.unconfirmed == 2
     assert result.verdict_breakdown.issues == 0
 
 

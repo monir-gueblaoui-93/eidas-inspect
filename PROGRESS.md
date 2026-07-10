@@ -1749,6 +1749,94 @@ was a token/CSS swap, not a rebuild.
   not-trusted/neutral) render legibly in both the banner and inline
   field-value contexts.
 
+## Diagnosed: live "8 of 8 unconfirmed" report -- honest degraded mode, not a regression
+
+A live report showed an 8-signature document where every signature was
+"Qualified · VALID" but also "Unconfirmed", with the overall verdict
+"Partially trusted -- qualified status could not be confirmed for 8 of 8."
+Diagnosed before touching anything, per the explicit ask:
+
+- **`/api/health` on the live deploy**: `trust_list.status: "stale"` with a
+  `refreshed_at` only ~3 minutes old -- not the 48h age-based staleness
+  path, so something failed *this* refresh cycle specifically.
+- **Reproduced directly**: ran `TrustListCache().refresh()` against the
+  real live EU LOTL from a dev machine. `lotl_status: ok`, but 2 of 31
+  member-state lists failed this cycle -- Estonia (`403 Forbidden` from
+  `sr.riik.ee`) and Ireland (a broken/expired SSL cert chain at
+  `eidas.gov.ie`). Both real, current, external conditions, unrelated to
+  this project's code.
+- **Traced `_trust_chain_status`** (`verify.py`, ~line 839): `is_degraded()`
+  is only consulted when a signer's issuing CA *isn't found* in the
+  registry at all -- a signer whose issuer *is* matched (e.g. a real
+  Scrive-issued cert on Sweden's list) goes straight to `TRUSTED`,
+  untouched by EE/IE failing. Confirmed locally: `qes_document.pdf` (a
+  real Scrive-issued cert) still read "Fully trusted / Confirmed on the EU
+  Trusted List" against this same live, degraded snapshot. Only signers
+  whose issuer isn't matched -- because their own territory is currently
+  degraded, or because they're genuinely unregistered -- get the honest
+  "can't confirm right now" treatment.
+- **The rebrand commit touched zero backend files** (`git show --stat`
+  confirmed only CSS/JSX/theme/PROGRESS.md), ruling it out as a cause
+  outright.
+
+Conclusion: honest degraded mode, correctly reported. Verdict logic is
+untouched, per the "don't fix what isn't broken" instruction. This is a
+known, deliberately conservative trade-off worth flagging as a future
+consideration (not changed here): `is_degraded()` is a snapshot-wide flag,
+so *any* territory failing marks *every* unmatched signer's status as
+"unavailable" rather than "not found", even when the unmatched signer's
+own real territory fetched fine this cycle. Scoping degradation per
+matched-territory instead of snapshot-wide would be more precise, but is a
+larger change than this diagnosis warranted.
+
+What did change: the wording, since a bare "could not be confirmed" reads
+as if the signatures themselves were deficient rather than the TL check
+being temporarily unavailable.
+
+- `_plain_summary`'s x509-only-unconfirmed branch (`verify.py`) now leads
+  with reassurance: `"Valid {noun} -- the EU Trusted List check is
+  temporarily unavailable, so qualified status couldn't be confirmed right
+  now[ for N of M]."` -- replacing `"Partially trusted -- qualified status
+  could not be confirmed right now for N of M {noun}."` Every item counted
+  in this branch already passed the BROKEN/TAMPERED/REVOKED/NOT_TRUSTED
+  checks, so "valid" is an accurate, not aspirational, claim. The
+  KSI-unconfirmed and mixed-unconfirmed branches are untouched -- those
+  are different kinds of uncertainty (the KSI seal's own internal check
+  hasn't been reached yet, not just a pending qualification lookup).
+- Two tests in `core/tests/test_verdict.py` lock in the new wording:
+  the existing single-signature case updated in place, plus a new
+  `test_multiple_valid_signatures_all_unconfirmed_is_partial_with_plural_wording`
+  covering the plural "N of M" shape (the actual shape reported live).
+  111/111 across `core/` + `api/`, up from 110.
+
+## Softened the PARTIAL banner
+
+Independent of the above: the PARTIAL banner's bold yellow-500
+(`#FFDE00`) fill read as alarming for what's usually just a caution/
+pending state, not an error -- and per the rebrand's own design intent,
+NOT_TRUSTED's red should be the only "loud" verdict color.
+
+- `--verdict-partial-bg` now points at the pale yellow-200 (`#FFF299`,
+  Canary) instead of yellow-500, used consistently across the banner,
+  the upload-error notice, and both small badges (previously the banner/
+  notice used the bold fill while badges already used a separate
+  "-subtle" token -- now unified on one token, since there's no longer a
+  bold variant in everyday use). The bold yellow-500 is kept as
+  `--verdict-partial-bg-strong`, defined but currently unused, in case a
+  future "can't-miss-it" warning state needs it.
+- Text stays Shark on the pale fill (12.9:1, comfortable margin). Since
+  yellow-200 is only ~1.05:1 apart in raw lightness from `--color-bg`
+  (Botticelli) -- the original reason it was avoided for the banner in
+  the first rebrand pass -- the banner and notice now get an explicit
+  full border (`--verdict-partial-border`, the same darkened-gold token
+  already used for the card left-border/field-value color) rather than
+  relying on fill contrast alone to read as a distinct surface.
+- Verified against the real live (currently degraded) Trusted List
+  snapshot with a fresh 8-signer fixture, all-unconfirmed/no-issues and
+  mixed-with-real-issues shapes, at both desktop and mobile widths -- the
+  softened fill plus border reads clearly as a distinct caution state
+  without the harshness of the original bold yellow.
+
 ## Next: Day 7 -- polish, continued
 
 1. Review the new KSI card design on the live Railway URL against a

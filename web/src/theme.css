@@ -78,20 +78,27 @@
   --verdict-trusted-icon: #165726;
 
   /* ---- Verdict: PARTIAL (Scrive "warning") ---- */
-  --verdict-partial-bg: #ffde00; /* yellow-500 School Bus Yellow — bold
-    banner/notice fill. Deliberately NOT yellow-200: that pale tint is only
-    ~1.05:1 different in lightness from --color-bg and would read as barely
-    distinguishable from the plain page background. */
-  --verdict-partial-bg-subtle: #fff299; /* yellow-200 Canary — small badges/
-    chips sitting on a white card, where the pale tint reads fine against
-    a neutral card rather than the page background. */
-  --verdict-partial-text: #27282d; /* Shark — 11.0:1 on partial-bg, 12.9:1
-    on partial-bg-subtle. Used wherever this pairs with its own yellow
-    fill (banner, notice, badges). */
+  /* Pale yellow-200 throughout (banner, notice, badges) -- PARTIAL is a
+     caution/pending state (often just "qualified status not yet
+     confirmed", nothing actually wrong), not an error, so it stays the
+     calmer of the two warning-tier fills. yellow-200 vs --color-bg is only
+     ~1.05:1 apart in raw lightness, so the banner gets an explicit full
+     border (--verdict-partial-border) rather than relying on fill
+     lightness alone to read as a distinct surface. NOT_TRUSTED (red) stays
+     the loud, unmistakable one. */
+  --verdict-partial-bg: #fff299; /* yellow-200 Canary */
+  --verdict-partial-bg-strong: #ffde00; /* yellow-500 School Bus Yellow --
+    kept available for a future "can't-miss-it" warning state, not
+    currently used anywhere: this rebrand deliberately moved away from it
+    for the banner/notice fill (too harsh/alarming for what's usually just
+    a pending-confirmation state), and NOT_TRUSTED already owns "loud". */
+  --verdict-partial-text: #27282d; /* Shark — 12.9:1 on partial-bg */
   --verdict-partial-icon: #7e711b; /* darkened gold, derived from yellow-500
     (1.34:1 on white as-is — fails outright) for the one role where warning
     needs to read as *colored text/icon* with no fill behind it (the
-    inline field-value color, the card's left border): 4.92:1 on white. */
+    inline field-value color) -- 4.92:1 on white. Also doubles as the
+    banner's border color, since the pale fill alone doesn't provide enough
+    definition against the page. */
   --verdict-partial-border: #7e711b;
 
   /* ---- Verdict: NOT_TRUSTED (Scrive "error") ---- */
