@@ -1513,6 +1513,65 @@ render) -- see this section's last bullet for how that stub was set up.
   heading -- all rendering as designed, not just passing a lint/build
   check.
 
+## Fixed: multi-item layout at realistic (8+) signature counts
+
+The previous "multi-item layout" fix (see above) was only verified against
+a 2-item fixture, where a side-by-side card grid happens to look fine.
+Reported broken against a real 8-signature document: all 8 cards rendered
+fully expanded, stacked in one column -- because expand-by-default was keyed
+off each item's tone (`needsAttention`), and real documents routinely have
+several qualified-but-unconfirmed/not-yet-trusted items, whose `partial`
+tone forced them open regardless of count.
+
+- **`COLLAPSE_THRESHOLD = 3` in `ResultView.jsx`.** At or below it (1-3
+  items), behavior is exactly as before: full cards, expand-by-default
+  driven by tone, side-by-side grid for 2-3. Above it ("dense" mode), every
+  row starts collapsed **regardless of tone** -- the collapsed row itself
+  (tone-colored left border, validity tick, verdict badge) is what surfaces
+  a problem now, not forced expansion, which is what let a document with
+  several unconfirmed/tampered items degenerate into a wall of open cards.
+- **`SignatureCard` gained a controlled-expansion mode**: `dense`,
+  `expanded`, `onToggle` props. When `expanded` is provided the card defers
+  entirely to the parent instead of managing its own `useState` -- needed
+  so a single "expand all/collapse all" control (new
+  `.result-view__toggle-all` button, only rendered in dense mode) can drive
+  every row's state at once via a `Set` of expanded indices in
+  `ResultView`. Small-count documents are untouched: `expanded` stays
+  `undefined`, so the card falls back to its original internal,
+  tone-driven `useState`.
+- **Dense-mode CSS** (`sig-card--dense`, `result-view__cards--dense`):
+  single-column list (not the auto-fit grid --multi uses), tighter
+  collapsed-row padding, `flex-wrap: nowrap` on desktop so the row spreads
+  across the full width (type icon, level badge, signer name -- `flex: 1`
+  with ellipsis truncation and a `title` tooltip so a long name doesn't
+  wrap the row -- validity tick, verdict badge, chevron, in that order),
+  falling back to `flex-wrap: wrap` under 720px so mobile still reads
+  cleanly across two lines per row instead of clipping.
+- **Verified against a real 8-signer PDF, not a synthetic 2-item
+  fixture** -- explicitly the gap that let the previous pass ship broken.
+  Built via `core/tests`' own fixture helpers (co-signed 8 times over one
+  minimal PDF, `tamper_page_after_signing` applied between the 1st and 2nd
+  signature): 3 CA-issued qualified signers registered on a seeded Trusted
+  List snapshot with a matching CRL (-> `confirmed_qualified`, green), 1
+  genuinely tampered (-> red), 1 qualified-but-unregistered against a
+  deliberately degraded snapshot (-> `unconfirmed`, amber), 3 plain
+  advanced signers (-> `not_qualified`, neutral) -- deliberately diverse
+  tones, not just a repeated shape. Served through the real `create_app()`
+  (seeded `TrustListCache`, stub CRL fetcher, `start_background_refresh=False`)
+  behind the actual production `web/dist` build (no dev-proxy shortcut),
+  driven by `puppeteer-core` against real Chrome: uploaded via the real
+  file input, screenshotted collapsed (all 8 rows, no scrolling, problem
+  rows visually distinct by border/badge color alone), one row expanded
+  in place, "expand all" expanding all 8 without disturbing the others,
+  and the same at a 390px mobile viewport. Also re-verified the 1-item and
+  2-item paths against fresh fixtures on the same running server to
+  confirm no regression: full card / side-by-side grid, byte-for-byte the
+  previous behavior, no dense-mode controls rendered.
+- **Threshold choice, stated explicitly per the ask**: collapse-by-default
+  above 3 items. 1-3 items keep the existing "clean, nothing to scan past"
+  full-card treatment; 4+ is where a card grid stops being scannable and
+  the dense list takes over.
+
 ## Next: Day 7 -- polish, continued
 
 1. Review the new KSI card design on the live Railway URL against a

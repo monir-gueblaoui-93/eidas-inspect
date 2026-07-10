@@ -102,8 +102,16 @@ function IssuerRow({ item }) {
  * the card starts as a compact, clickable summary row and only shows its
  * full body once expanded. When false (a single-item document), the full
  * card always renders -- the identity strip below still applies, so level
- * and signer stay prominent either way, just without a collapse control. */
-export default function SignatureCard({ item, collapsible = false }) {
+ * and signer stay prominent either way, just without a collapse control.
+ * @param {boolean} [props.dense] -- true for high-count documents (see
+ * `COLLAPSE_THRESHOLD` in ResultView.jsx): renders as a compact, full-width
+ * list row instead of a card-grid tile, and expand state is controlled
+ * externally (via `expanded`/`onToggle`) so a document-level "expand all"
+ * control can drive every row at once.
+ * @param {boolean} [props.expanded] -- when provided, the card's expand
+ * state is controlled by the parent instead of managed internally.
+ * @param {() => void} [props.onToggle] -- required alongside `expanded`. */
+export default function SignatureCard({ item, collapsible = false, dense = false, expanded: expandedProp, onToggle }) {
   const tone = itemTone(item)
   const type = typeDisplay(item)
   const TypeIcon = type.icon
@@ -115,10 +123,18 @@ export default function SignatureCard({ item, collapsible = false }) {
 
   // Problems surface immediately even in a collapsed multi-item list --
   // same "don't make the user go looking for bad news" rule the technical
-  // drawer below already follows.
+  // drawer below already follows. In `dense` mode this default is overridden
+  // by the controlled `expanded` prop instead (see ResultView.jsx): with
+  // many items, EVERY row starts collapsed regardless of tone, and the
+  // tone-colored badge/validity-tick on the row itself is what surfaces a
+  // problem without forcing a wall of expanded cards back onto the screen.
   const needsAttention = tone === 'not-trusted' || tone === 'partial'
-  const [expanded, setExpanded] = useState(!collapsible || needsAttention)
+  const isControlled = expandedProp !== undefined
+  const [internalExpanded, setInternalExpanded] = useState(!collapsible || needsAttention)
   const [showTechnical, setShowTechnical] = useState(needsAttention)
+
+  const expanded = isControlled ? expandedProp : internalExpanded
+  const toggleExpanded = isControlled ? onToggle : () => setInternalExpanded((v) => !v)
 
   const showBody = !collapsible || expanded
   const SummaryTag = collapsible ? 'button' : 'div'
@@ -130,14 +146,15 @@ export default function SignatureCard({ item, collapsible = false }) {
     <article
       className={`sig-card sig-card--${tone}${collapsible ? ' sig-card--collapsible' : ''}${
         collapsible && expanded ? ' sig-card--expanded' : ''
-      }`}
+      }${dense ? ' sig-card--dense' : ''}`}
     >
       <SummaryTag
         type={collapsible ? 'button' : undefined}
         className="sig-card__summary"
         aria-expanded={collapsible ? expanded : undefined}
         aria-label={collapsible ? summaryLabel : undefined}
-        onClick={collapsible ? () => setExpanded((v) => !v) : undefined}
+        title={dense && signerText ? signerText : undefined}
+        onClick={collapsible ? toggleExpanded : undefined}
       >
         <span className="sig-card__type">
           <TypeIcon size={22} />

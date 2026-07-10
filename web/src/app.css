@@ -483,6 +483,55 @@ input {
   }
 }
 
+/* Dense mode (8+ signatures): a single scannable column of full-width rows,
+   not a side-by-side card grid -- overrides --multi's auto-fit above. Rows
+   sit close together (tighter gap) since a collapsed row is a single line;
+   expanding one just grows that row in place. */
+.result-view__cards--dense {
+  grid-template-columns: 1fr;
+  gap: var(--space-2);
+}
+
+.result-view__list-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.result-view__count {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--color-text-muted);
+}
+
+.result-view__toggle-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: 1.5px solid var(--color-border-strong);
+  border-radius: var(--radius-pill);
+  color: var(--color-text);
+  font-weight: 700;
+  font-size: var(--text-sm);
+  padding: 6px 16px;
+  cursor: pointer;
+}
+
+.result-view__toggle-all:hover {
+  background: var(--color-surface-sunken);
+}
+
+.result-view__toggle-all svg {
+  transition: transform 0.15s ease;
+}
+
+.result-view__toggle-all svg.is-open {
+  transform: rotate(180deg);
+}
+
 .sig-card {
   background: var(--color-surface);
   border-radius: var(--radius-lg);
@@ -512,6 +561,49 @@ input {
    narrow grid column. */
 .sig-card--collapsible.sig-card--expanded {
   grid-column: 1 / -1;
+}
+
+/* Dense (8+ item) rows: tighter vertical padding while collapsed so 8-20
+   rows read as a compact list, not a stack of cards -- padding grows back
+   to the normal card feel once a row is expanded, since it then shows the
+   full detail body. */
+.sig-card--dense {
+  padding: var(--space-3) var(--space-4);
+}
+
+.sig-card--dense.sig-card--expanded {
+  padding: var(--space-5);
+}
+
+.sig-card--dense .sig-card__summary {
+  gap: var(--space-4);
+  flex-wrap: nowrap;
+}
+
+@media (max-width: 720px) {
+  .sig-card--dense .sig-card__summary {
+    flex-wrap: wrap;
+  }
+}
+
+/* The signer name is the one field that should soak up whatever horizontal
+   space a wide viewport leaves free -- everything else (type, badges,
+   validity tick, chevron) stays fixed-width and the name truncates with an
+   ellipsis rather than wrapping the row onto a second line. Full name is
+   still available via the row's `title` attribute. */
+.sig-card--dense .sig-card__summary-signer {
+  flex: 1 1 auto;
+  min-width: 60px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sig-card--dense .sig-card__type,
+.sig-card--dense .sig-card__level-badge,
+.sig-card--dense .sig-card__validity,
+.sig-card--dense .sig-card__badge {
+  flex-shrink: 0;
 }
 
 .sig-card__summary {
